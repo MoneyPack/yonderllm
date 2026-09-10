@@ -1,0 +1,493 @@
+# yonderllm
+
+A terminal client for large language models that never runs one.
+
+Inference happens *yonder* — on a provider's hardware, over the network. Your
+machine draws the interface and shuttles bytes. Nothing is downloaded, nothing
+is quantised, nothing warms your lap. The result is a single static binary that
+starts instantly on a laptop, a Raspberry Pi, or a shell you SSH into, and that
+works entirely within the free tiers of the providers it speaks to.
+
+```
+$ yonderllm
+```
+
+That is the whole thing. Bare `yonderllm` opens the TUI. Everything else is a
+subcommand for when you want an answer without a session.
+
+---
+
+## Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Flags](#flags)
+- [Providers and API keys](#providers-and-api-keys)
+- [Configuration](#configuration)
+- [The TUI](#the-tui)
+- [Scripting with `run --json`](#scripting-with-run---json)
+- [Modes](#modes)
+- [Project layout](#project-layout)
+- [Development](#development)
+
+---
+
+## Install
+
+### From source
+
+Requires Go 1.27 or newer.
+
+```sh
+go install yonderllm/cmd/yonderllm@latest
+```
+
+Or build from a clone:
+
+```sh
+git clone <repo> yonderllm
+cd yonderllm
+go build -o bin/yonderllm ./cmd/yonderllm
+```
+
+### Release build
+
+Stripped, with the version stamped in:
+
+```sh
+go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.1.0" \
+  -o bin/yonderllm ./cmd/yonderllm
+```
+
+On Windows PowerShell:
+
+```powershell
+go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.1.0" `
+  -o .\bin\yonderllm.exe .\cmd\yonderllm
+```
+
+Verify:
+
+```
+$ yonderllm --version
+yonderllm 0.1.0
+```
+
+### Shell completion
+
+```sh
+yonderllm completion bash   > /etc/bash_completion.d/yonderllm
+yonderllm completion zsh    > "${fpath[1]}/_yonderllm"
+yonderllm completion fish   > ~/.config/fish/completions/yonderllm.fish
+yonderllm completion powershell | Out-String | Invoke-Expression
+```
+
+---
+
+## Quick start
+
+Set one API key and go. Groq's free tier needs no card:
+
+```sh
+export GROQ_API_KEY=gsk_...
+yonderllm
+```
+
+Check what yonderllm can see:
+
+```
+$ yonderllm providers
+  PROVIDER    ROLE      MODEL  KEY                 STATUS
+* groq        active    -      GROQ_API_KEY        no key
+  gemini      fallback  -      GEMINI_API_KEY      no key
+  openrouter  fallback  -      OPENROUTER_API_KEY  ready
+
+Set the listed environment variable to enable a provider.
+```
+
+The `*` marks the active provider. `ready` means a key was found in the
+environment. If the active provider has no key, yonderllm says so plainly
+rather than failing deep inside a request:
+
+```
+$ yonderllm models
+yonderllm: groq: authentication failed: no API key: set GROQ_API_KEY
+```
+
+---
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| *(none)* | Open the interactive TUI |
+| `ask` | Send one prompt, print the reply, exit |
+| `run` | Same as `ask`, but can emit machine-readable NDJSON |
+| `models` | List the models the active provider offers |
+| `providers` | Show every provider, its role, and whether its key is set |
+| `config` | Inspect or create the configuration file |
+| `completion` | Generate a shell completion script |
+| `help` | Help about any command |
+
+### `ask`
+
+The conversational one-shot. Reads the prompt from the arguments, or from
+stdin if there are none, so it composes with the rest of your shell.
+
+```sh
+yonderllm ask "explain the difference between a mutex and a semaphore"
+
+git diff | yonderllm ask "write a commit message for this diff"
+
+yonderllm -p gemini ask "summarise the CAP theorem"
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `-q`, `--quiet` | Print only the reply — no provider banner, no usage footer |
+
+### `run`
+
+The scriptable one-shot. Identical output to `ask` by default; with `--json`
+it emits one JSON object per line instead.
+
+```sh
+yonderllm run "hello"
+yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--json` | Emit newline-delimited JSON events instead of prose |
+
+### `models`
+
+```sh
+yonderllm models              # free-tier models on the active provider
+yonderllm models --all        # everything the provider advertises
+yonderllm -p openrouter models
+```
+
+yonderllm filters to free-tier models by default, because paying by accident is
+the one failure mode a free-tier client must not have. When that filter leaves
+nothing, it tells you rather than printing an empty table:
+
+```
+$ yonderllm -p openrouter models
+openrouter reports no free-tier models. Try --all.
+```
+
+### `config`
+
+```sh
+yonderllm config path    # where the config file would be read from
+yonderllm config show    # the effective configuration, after all overrides
+yonderllm config init    # write a commented starter file
+```
+
+`config show` is the authority on what yonderllm actually believes, with every
+layer of precedence already applied. Reach for it before assuming a flag or an
+environment variable did what you meant.
+
+---
+
+## Flags
+
+These apply to every command and to the TUI.
+
+| Flag | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `-p`, `--provider` | string | from config | Provider to use |
+| `-m`, `--model` | string | provider's default | Model to use |
+| `--mode` | string | `chat` | Permission mode: `chat`, `code`, or `agent` |
+| `--max-tokens` | int | from config | Cap the reply length |
+| `--daily-cap` | int | `-1` | Max requests per day; `-1` means use the config value |
+| `--config` | string | see below | Path to an alternate config file |
+| `-v`, `--version` | | | Print the version and exit |
+| `-h`, `--help` | | | Help for any command |
+
+---
+
+## Providers and API keys
+
+Three providers are configured out of the box. All three have a free tier;
+none of them is asked for a card by yonderllm.
+
+| Provider | Environment variable | Base URL | Suggested free model |
+| --- | --- | --- | --- |
+| `groq` *(default)* | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+| `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta` | `gemini-2.0-flash` |
+| `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `meta-llama/llama-3.3-70b-instruct:free` |
+
+Keys are read from the environment only. yonderllm never writes a key to its
+config file, and the config file names the *variable*, not the secret — so it
+is safe to commit or sync.
+
+### Fallbacks
+
+Providers form a chain. The first one with a key becomes active; the others
+stand by. If the active provider fails a request, yonderllm moves down the
+chain rather than surfacing the error, and reports the substitution as a
+notice. Reorder the chain with `fallbacks` in the config file.
+
+### Any OpenAI-compatible endpoint
+
+The provider list is not closed. Anything that speaks the OpenAI chat
+completions API — another hosted service, or a local server if you decide you
+want one after all — can be added as a `[providers.<name>]` block. Omit
+`api_key_env` for a server that needs no key.
+
+---
+
+## Configuration
+
+### Location
+
+```
+$YONDERLLM_CONFIG            if set
+<user config dir>/yonderllm/config.toml   otherwise
+```
+
+Which resolves to:
+
+| OS | Path |
+| --- | --- |
+| Linux | `~/.config/yonderllm/config.toml` |
+| macOS | `~/Library/Application Support/yonderllm/config.toml` |
+| Windows | `%AppData%\yonderllm\config.toml` |
+
+Ask rather than guess:
+
+```sh
+yonderllm config path
+```
+
+The file is optional. Without it, yonderllm uses its built-in defaults.
+
+### Precedence
+
+Later layers win:
+
+```
+built-in defaults  →  config file  →  YONDERLLM_* environment  →  command-line flags
+```
+
+Only three settings can be overridden by environment variable:
+
+| Variable | Overrides |
+| --- | --- |
+| `YONDERLLM_PROVIDER` | active provider |
+| `YONDERLLM_MODEL` | model |
+| `YONDERLLM_MODE` | permission mode |
+
+(`YONDERLLM_CONFIG` selects the file itself, and so sits outside the chain.)
+`max_tokens` and `daily_cap` are set in the config file or by flag — there is
+deliberately no environment override for the two settings that guard your
+quota.
+
+### Example
+
+`yonderllm config init` writes a commented version of this:
+
+```toml
+provider  = "groq"
+fallbacks = ["gemini", "openrouter"]
+mode      = "chat"
+
+max_tokens = 2048
+daily_cap  = 200
+
+[providers.groq]
+base_url    = "https://api.groq.com/openai/v1"
+api_key_env = "GROQ_API_KEY"
+model       = "llama-3.3-70b-versatile"
+
+[providers.gemini]
+base_url    = "https://generativelanguage.googleapis.com/v1beta"
+api_key_env = "GEMINI_API_KEY"
+model       = "gemini-2.0-flash"
+
+[providers.openrouter]
+base_url    = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+model       = "meta-llama/llama-3.3-70b-instruct:free"
+
+# Any OpenAI-compatible endpoint works. Omit api_key_env if it needs no key.
+# [providers.local]
+# base_url = "http://localhost:8080/v1"
+```
+
+### The daily cap
+
+`daily_cap` is a local counter, not a provider feature. yonderllm tracks how
+many requests it has made today and refuses the one that would exceed the cap:
+
+```
+daily request cap reached (200/200), resets at 00:00
+```
+
+It exists because free tiers punish enthusiasm quietly. `/usage` in the TUI
+shows where you stand.
+
+---
+
+## The TUI
+
+Bare `yonderllm` opens it. The transcript scrolls above; you type below.
+
+### Slash commands
+
+```
+/model                 show the provider and model in use
+/model <model>         switch model on the current provider
+/model <provider>      switch provider, keeping its configured model
+/model <provider> <model>
+                       switch both at once
+/clear                 forget the conversation so far
+/usage                 show requests used against the daily cap
+/help                  show this
+```
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| `enter` | Send |
+| `ctrl+j` | Newline |
+| `pgup` / `pgdn` | Scroll the transcript |
+| `ctrl+c` | Stop a reply in flight, or quit |
+
+`ctrl+c` is deliberately overloaded: the first press interrupts a stream, and a
+press with nothing in flight exits. You never need a second key to escape a
+runaway answer.
+
+Switching model with `/model` keeps the conversation. Only `/clear` discards it.
+
+---
+
+## Scripting with `run --json`
+
+`run --json` emits newline-delimited JSON — one object per line, flushed as it
+arrives, so a pipe stays live for the whole stream.
+
+```sh
+yonderllm run --json "count to three"
+```
+
+```json
+{"type":"notice","notice":"groq unavailable, using gemini","provider":"gemini","model":"gemini-2.0-flash"}
+{"type":"delta","delta":"one"}
+{"type":"delta","delta":", two"}
+{"type":"delta","delta":", three"}
+{"type":"done","provider":"gemini","model":"gemini-2.0-flash","usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}
+```
+
+### Event schema
+
+| Field | Type | Present on | Meaning |
+| --- | --- | --- | --- |
+| `type` | string | all | `delta`, `notice`, `done`, or `error` |
+| `delta` | string | `delta` | The next fragment of the reply |
+| `notice` | string | `notice` | Something worth knowing, such as a fallback |
+| `provider` | string | `notice`, `done` | Provider that served the request |
+| `model` | string | `notice`, `done` | Model that served the request |
+| `error` | string | `error` | What went wrong |
+| `usage` | object | `done` | `prompt_tokens`, `completion_tokens`, `total_tokens` |
+
+A stream ends with exactly one `done` or one `error`. Notices are informational
+and never terminal, which means a consumer can ignore every type it does not
+recognise and still be correct.
+
+Reassemble a reply:
+
+```sh
+yonderllm run --json "$PROMPT" | jq -rj 'select(.type=="delta").delta'
+```
+
+Fail a script on a provider error:
+
+```sh
+yonderllm run --json "$PROMPT" \
+  | jq -e 'select(.type=="error") | halt_error(1)' >/dev/null
+```
+
+---
+
+## Modes
+
+`--mode` sets how much yonderllm is permitted to touch.
+
+| Mode | Read / search | Write | Execute |
+| --- | --- | --- | --- |
+| `chat` *(default)* | ✗ | ✗ | ✗ |
+| `code` | allow | ask | ✗ |
+| `agent` | allow | ask | ask |
+
+The policy is enforced in one place, `internal/perm`, so the rules can be read
+and tested as a unit rather than inferred from call sites. Escalation is always
+an explicit act: nothing promotes itself out of `chat`.
+
+> **Status.** The permission model is implemented and tested; the workspace
+> tools it governs are not yet built. `internal/workspace` is currently an
+> empty package. In this release `code` and `agent` are accepted, validated,
+> and displayed, but no mode reads, writes, or executes anything — every mode
+> behaves as `chat` in practice. The table above describes the policy that
+> the tools will be wired into, not capabilities that exist today.
+
+---
+
+## Project layout
+
+```
+cmd/yonderllm/      entry point; nothing but wiring
+internal/cli/       commands, flags, and the defaults → config → env → flags resolver
+internal/config/    the config file, its paths, and its precedence rules
+internal/provider/  HTTP clients for OpenAI-compatible endpoints
+internal/session/   conversation state, streaming, fallback chain, usage cap
+internal/perm/      the permission policy
+internal/tui/       the Bubble Tea interface
+internal/workspace/ reserved for filesystem tools; currently empty
+```
+
+Built on [Cobra](https://github.com/spf13/cobra),
+[Bubble Tea](https://github.com/charmbracelet/bubbletea),
+[Bubbles](https://github.com/charmbracelet/bubbles),
+[Lip Gloss](https://github.com/charmbracelet/lipgloss), and
+[BurntSushi/toml](https://github.com/BurntSushi/toml). Five direct
+dependencies, no C, one binary.
+
+---
+
+## Development
+
+```sh
+go vet ./...
+go test ./...
+```
+
+On Windows, if Go is installed but not on `PATH`:
+
+```powershell
+& "C:\Program Files\Go\bin\go.exe" vet ./...
+& "C:\Program Files\Go\bin\go.exe" test ./...
+```
+
+### Cross-compiling
+
+```sh
+GOOS=linux  GOARCH=amd64 go build -o dist/yonderllm-linux-amd64  ./cmd/yonderllm
+GOOS=linux  GOARCH=arm64 go build -o dist/yonderllm-linux-arm64  ./cmd/yonderllm
+GOOS=darwin GOARCH=arm64 go build -o dist/yonderllm-darwin-arm64 ./cmd/yonderllm
+```
+
+No cgo, so every target cross-compiles from any host.
+
+### Conventions
+
+- Every file opens with a prose doc comment explaining what it is for and why
+  it is separate from its neighbours.
+- Tests assert on substrings, not exact output, so that wording can improve
+  without a test rewrite.
+- `SPEC.md` holds the goals, non-goals, and interface contracts. It is the
+  document to change first when the design changes.

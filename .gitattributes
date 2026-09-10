@@ -1,0 +1,14 @@
+# Normalize line endings so checkouts are identical on every platform
+# yonderllm targets. Text files are stored LF in the repository.
+* text=auto eol=lf
+
+*.go    text eol=lf diff=golang
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Release artifacts are binary; never touch their bytes.
+*.exe binary

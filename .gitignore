@@ -1,0 +1,32 @@
+# Build output
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Local configuration. yonderllm's real config lives in the user config
+# directory, but a repo-local copy is a convenient way to test overrides via
+# YONDERLLM_CONFIG, and it usually names environment variables worth keeping
+# out of history.
+/config.toml
+*.local.toml
+.env
+.env.*
+
+# Go workspace files, which are per-machine by definition
+go.work
+go.work.sum
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
