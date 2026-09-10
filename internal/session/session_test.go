@@ -26,7 +26,7 @@ type fakeProvider struct {
 func (f *fakeProvider) Name() string { return f.name }
 
 func (f *fakeProvider) Models(ctx context.Context) ([]provider.Model, error) {
-	return []provider.Model{{ID: "fake-model", Name: "Fake", Free: true}}, nil
+	return []provider.Model{{ID: "fake-model", Name: "Fake", Pricing: provider.Pricing{Known: true}}}, nil
 }
 
 func (f *fakeProvider) Stream(ctx context.Context, req provider.Request) iter.Seq2[provider.Chunk, error] {

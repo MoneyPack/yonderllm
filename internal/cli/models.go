@@ -27,10 +27,15 @@ func newModelsCmd(e *env) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "models [provider]",
 		Short: "List the models a provider offers",
-		Long: "List the models available from a provider, newest catalogue first.\n\n" +
-			"Only free-tier models are shown by default, because yonderllm is built\n" +
-			"to run on free tiers and a paid model listed alongside them is an easy\n" +
-			"way to spend money by accident. Pass --all to see everything.\n\n" +
+		Long: "List the models available from a provider, cheapest tier first.\n\n" +
+			"Free and cheap models are shown by default. Cheap means both the input\n" +
+			"and the output rate sit at or under $1 per million tokens, which covers\n" +
+			"the small remote models yonderllm is built around; a frontier model\n" +
+			"listed beside them is an easy way to spend money by accident, so those\n" +
+			"are hidden until you pass --all. Models a provider quotes no price for\n" +
+			"are shown as unknown rather than guessed at.\n\n" +
+			"The PRICE/1M column reads input rate then output rate, in US dollars\n" +
+			"per million tokens.\n\n" +
 			"With no argument the active provider is used, so --provider and the\n" +
 			"positional form are interchangeable.",
 		Example: `yonderllm models
@@ -78,7 +83,7 @@ yonderllm models --json | jq -r '.models[].id'`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&all, "all", false, "include models that are not on the free tier")
+	cmd.Flags().BoolVar(&all, "all", false, "include models priced above the cheap tier")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the catalogue as a JSON object")
 	return cmd
 }
@@ -90,22 +95,25 @@ func filterModels(models []provider.Model, all bool) []provider.Model {
 	}
 	kept := make([]provider.Model, 0, len(models))
 	for _, m := range models {
-		if m.Free {
+		if m.Affordable() {
 			kept = append(kept, m)
 		}
 	}
 	return kept
 }
 
-// sortModels orders free models first and then by id.
+// sortModels orders models cheapest tier first and then by id.
 //
 // Ordering by id rather than by the provider's own order makes the output
-// diffable between runs, and putting free models on top means the ones a free
-// tier can actually reach are visible without scrolling under --all.
+// diffable between runs, and leading with the cheapest tier means the models
+// yonderllm is meant to be pointed at stay visible without scrolling under
+// --all. Within a tier the rates are not compared, because a catalogue is read
+// to pick a model rather than to shave hundredths of a cent off one.
 func sortModels(models []provider.Model) {
 	sort.SliceStable(models, func(i, j int) bool {
-		if models[i].Free != models[j].Free {
-			return models[i].Free
+		li, lj := models[i].Tier().Rank(), models[j].Tier().Rank()
+		if li != lj {
+			return li < lj
 		}
 		return models[i].ID < models[j].ID
 	})
@@ -119,9 +127,10 @@ func writeModelsTable(cmd *cobra.Command, providerName, active string, models []
 		if all {
 			fmt.Fprintf(out, "%s reports no models.\n", providerName)
 		} else {
-			// Distinguishing "nothing at all" from "nothing free" saves
-			// the user from concluding the provider is broken.
-			fmt.Fprintf(out, "%s reports no free-tier models. Try --all.\n", providerName)
+			// Distinguishing "nothing at all" from "nothing cheap
+			// enough" saves the user from concluding the provider is
+			// broken.
+			fmt.Fprintf(out, "%s reports no free or cheap models. Try --all.\n", providerName)
 		}
 		return nil
 	}
@@ -129,14 +138,15 @@ func writeModelsTable(cmd *cobra.Command, providerName, active string, models []
 	// A tabwriter is flushed once at the end, so a write error surfaces
 	// there rather than on every column.
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "  MODEL\tNAME\tCONTEXT\tTIER")
+	fmt.Fprintln(w, "  MODEL\tNAME\tCONTEXT\tPRICE/1M\tTIER")
 	for _, m := range models {
 		marker := " "
 		if m.ID == active {
 			marker = "*"
 		}
-		fmt.Fprintf(w, "%s %s\t%s\t%s\t%s\n",
-			marker, m.ID, displayName(m), contextLabel(m.ContextWindow), tierLabel(m.Free))
+		fmt.Fprintf(w, "%s %s\t%s\t%s\t%s\t%s\n",
+			marker, m.ID, displayName(m), contextLabel(m.ContextWindow),
+			priceLabel(m.Pricing), tierLabel(m.Tier()))
 	}
 	if err := w.Flush(); err != nil {
 		return err
@@ -157,8 +167,22 @@ type wireModel struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
 	ContextWindow int    `json:"context_window,omitempty"`
-	Free          bool   `json:"free"`
-	Active        bool   `json:"active"`
+	Tier          string `json:"tier"`
+	// Pricing is omitted rather than zeroed when a provider quotes no
+	// price, so a consumer cannot mistake silence for free.
+	Pricing *wirePricing `json:"pricing,omitempty"`
+	Active  bool         `json:"active"`
+}
+
+// wirePricing is the JSON shape of a model's rates.
+//
+// The figures are per million tokens rather than the per-token rates the
+// adapters decode, because that is the unit prices are quoted and compared in
+// everywhere outside an API response, and a consumer reading this document is
+// far likelier to want the number it can show a human than the raw one.
+type wirePricing struct {
+	PromptUSDPerMillion     float64 `json:"prompt_usd_per_million"`
+	CompletionUSDPerMillion float64 `json:"completion_usd_per_million"`
 }
 
 // wireCatalogue is the top-level JSON document written by models --json.
@@ -182,13 +206,23 @@ func writeModelsJSON(cmd *cobra.Command, providerName, active string, models []p
 		Models: make([]wireModel, 0, len(models)),
 	}
 	for _, m := range models {
-		doc.Models = append(doc.Models, wireModel{
+		entry := wireModel{
 			ID:            m.ID,
 			Name:          displayName(m),
 			ContextWindow: m.ContextWindow,
-			Free:          m.Free,
+			Tier:          string(m.Tier()),
 			Active:        m.ID == active,
-		})
+		}
+		// An unpriced model carries no pricing member at all, so a
+		// consumer has to handle the absence deliberately instead of
+		// reading a zero rate as free.
+		if m.Pricing.Known {
+			entry.Pricing = &wirePricing{
+				PromptUSDPerMillion:     perMillion(m.Pricing.Prompt),
+				CompletionUSDPerMillion: perMillion(m.Pricing.Completion),
+			}
+		}
+		doc.Models = append(doc.Models, entry)
 	}
 
 	enc := json.NewEncoder(cmd.OutOrStdout())
@@ -217,10 +251,50 @@ func contextLabel(tokens int) string {
 	return strconv.Itoa(tokens)
 }
 
-// tierLabel names the billing tier of a model.
-func tierLabel(free bool) string {
-	if free {
-		return "free"
+// perMillion converts a per-token rate into the per-million-token figure
+// prices are quoted in outside an API response.
+func perMillion(rate float64) float64 {
+	return rate * 1e6
+}
+
+// priceLabel renders a model's rates as input then output, in US dollars per
+// million tokens.
+//
+// Both rates are shown because they diverge by an order of magnitude on the
+// small remote models yonderllm targets, and a single blended number would hide
+// which half of a conversation is the expensive one. A provider that quotes no
+// price reads as unknown rather than as free, so the pricing column never
+// invents a figure the provider did not publish.
+func priceLabel(p provider.Pricing) string {
+	if !p.Known {
+		return "unknown"
 	}
-	return "paid"
+	return fmt.Sprintf("%s / %s", rateLabel(p.Prompt), rateLabel(p.Completion))
+}
+
+// rateLabel formats one per-token rate as a per-million-token figure.
+//
+// Two decimals is the resolution that separates the cheap models from each
+// other; a genuinely free model prints as a plain 0 rather than 0.00 so it
+// stands out in a column of priced neighbours.
+func rateLabel(rate float64) string {
+	perM := perMillion(rate)
+	if perM == 0 {
+		return "0"
+	}
+	return strconv.FormatFloat(perM, 'f', 2, 64)
+}
+
+// tierLabel names the billing tier of a model.
+//
+// The [provider.Tier] values are already the words meant for a reader, so this
+// is a deliberate narrowing rather than a translation: it keeps the table from
+// printing whatever a future tier constant happens to be spelled as.
+func tierLabel(t provider.Tier) string {
+	switch t {
+	case provider.TierFree, provider.TierCheap, provider.TierPaid:
+		return string(t)
+	default:
+		return string(provider.TierUnknown)
+	}
 }

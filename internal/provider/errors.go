@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// ErrQuota signals that a provider refused the request because a free-tier
-// limit or rate limit was reached. The core treats this as the trigger for
-// falling back to the next configured provider.
+// ErrQuota signals that a provider refused the request because an allowance or
+// rate limit was reached. The core treats this as the trigger for falling back
+// to the next configured provider.
 var ErrQuota = errors.New("provider quota exhausted")
 
 // ErrAuth signals a missing, malformed, or rejected credential. Falling back

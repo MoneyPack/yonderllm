@@ -6,7 +6,7 @@ Inference happens *yonder* — on a provider's hardware, over the network. Your
 machine draws the interface and shuttles bytes. Nothing is downloaded, nothing
 is quantised, nothing warms your lap. The result is a single static binary that
 starts instantly on a laptop, a Raspberry Pi, or a shell you SSH into, and that
-works entirely within the free tiers of the providers it speaks to.
+stays inside the free and near-free tiers of the providers it speaks to.
 
 ```
 $ yonderllm
@@ -165,18 +165,42 @@ yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'
 ### `models`
 
 ```sh
-yonderllm models              # free-tier models on the active provider
+yonderllm models              # free and cheap models on the active provider
 yonderllm models --all        # everything the provider advertises
 yonderllm -p openrouter models
 ```
 
-yonderllm filters to free-tier models by default, because paying by accident is
-the one failure mode a free-tier client must not have. When that filter leaves
-nothing, it tells you rather than printing an empty table:
+Every model is banded into one of four tiers by the price the provider
+advertises, measured in US dollars per million tokens:
+
+| Tier | Meaning |
+| --- | --- |
+| `free` | Both input and output are priced at zero |
+| `cheap` | Both input and output are at or under $1.00 per million tokens |
+| `paid` | Either side costs more than that |
+| `unknown` | The provider advertised no usable price |
+
+yonderllm hides the `paid` tier by default, because paying by accident is the
+one failure mode a client like this must not have. `free`, `cheap`, and
+`unknown` all pass the filter — an unpriced model is shown, and labelled
+honestly, rather than silently dropped. When the filter leaves nothing, it tells
+you rather than printing an empty table:
 
 ```
 $ yonderllm -p openrouter models
-openrouter reports no free-tier models. Try --all.
+openrouter reports no free or cheap models. Try --all.
+```
+
+The table prints both halves of the price, input first:
+
+```
+$ yonderllm -p surplus models
+  MODEL                NAME          CONTEXT  PRICE/1M     TIER
+* openai-gpt-oss-120b  GPT OSS 120B  125K     0.07 / 0.30  cheap
+  gratis-8b            Gratis 8B     32K      0 / 0        free
+  silent-rates         Silent Rates  8K       unknown      unknown
+
+* active model for surplus
 ```
 
 ### `config`
@@ -334,8 +358,8 @@ many requests it has made today and refuses the one that would exceed the cap:
 daily request cap reached (200/200), resets at 00:00
 ```
 
-It exists because free tiers punish enthusiasm quietly. `/usage` in the TUI
-shows where you stand.
+It exists because free tiers punish enthusiasm quietly and cheap tiers bill it.
+`/usage` in the TUI shows where you stand.
 
 ---
 

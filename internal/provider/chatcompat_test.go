@@ -329,6 +329,60 @@ func TestModelsAcceptsEitherContextField(t *testing.T) {
 	}
 }
 
+// TestModelsCarriesPricingThroughToTiers walks a surplus-shaped catalogue from
+// the wire to the tier the CLI bands it into, so a regression in the decimal
+// string parsing shows up as a wrong tier rather than a silent zero rate.
+func TestModelsCarriesPricingThroughToTiers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		io.WriteString(w, `{"data":[
+			{"id":"openai-gpt-oss-120b","name":"GPT OSS 120B","context_length":128000,
+			 "pricing":{"prompt":"0.0000000700","completion":"0.0000003000"}},
+			{"id":"gratis","context_length":8192,
+			 "pricing":{"prompt":"0","completion":"0"}},
+			{"id":"frontier","context_length":200000,
+			 "pricing":{"prompt":"0.0000020000","completion":"0.0000080000"}},
+			{"id":"silent-rates","context_length":4096,
+			 "pricing":{"prompt":"","completion":""}},
+			{"id":"no-pricing-member","context_length":4096}
+		]}`)
+	}))
+	defer srv.Close()
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	models, err := p.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models failed: %v", err)
+	}
+	want := []Model{
+		{ID: "openai-gpt-oss-120b", Name: "GPT OSS 120B", ContextWindow: 128000,
+			Pricing: Pricing{Known: true, Prompt: 7e-8, Completion: 3e-7}},
+		{ID: "gratis", Name: "gratis", ContextWindow: 8192,
+			Pricing: Pricing{Known: true}},
+		{ID: "frontier", Name: "frontier", ContextWindow: 200000,
+			Pricing: Pricing{Known: true, Prompt: 2e-6, Completion: 8e-6}},
+		{ID: "silent-rates", Name: "silent-rates", ContextWindow: 4096},
+		{ID: "no-pricing-member", Name: "no-pricing-member", ContextWindow: 4096},
+	}
+	if len(models) != len(want) {
+		t.Fatalf("got %d models, want %d", len(models), len(want))
+	}
+	for i := range want {
+		if models[i] != want[i] {
+			t.Errorf("model %d = %+v, want %+v", i, models[i], want[i])
+		}
+	}
+
+	tiers := []Tier{TierCheap, TierFree, TierPaid, TierUnknown, TierUnknown}
+	for i, tier := range tiers {
+		if got := models[i].Tier(); got != tier {
+			t.Errorf("%s tier = %q, want %q", models[i].ID, got, tier)
+		}
+	}
+}
+
 func TestModelsPropagatesTypedErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

@@ -4,13 +4,14 @@
 
 A terminal LLM client written in Go. Inference always runs remotely — the local
 machine only draws a terminal UI and shuttles bytes. Single static binary, no
-runtime dependencies, no VPS, free-tier friendly.
+runtime dependencies, no VPS, friendly to free and cheap tiers.
 
 ## 1. Goals
 
 1. **Zero local inference.** No model weights, no GPU requirement. The client is
    a thin transport + UI layer.
-2. **Near-zero running cost.** Default to provider free tiers; fall back
+2. **Near-zero running cost.** Default to free and cheap models — anything at or
+   under $1 per million tokens on both input and output; fall back
    automatically when a quota is exhausted.
 3. **Provider-agnostic.** One adapter interface; many backends.
 4. **Safe by default.** Chat mode has no filesystem or shell access. Escalation
@@ -50,7 +51,8 @@ Three ways to drive the same core:
 ### CLI subcommands
 
 - `ask <prompt>` — one-shot completion. `--json` for machine-readable output.
-- `models` — list models available on the active provider.
+- `models` — list free and cheap models on the active provider. `--all` includes
+  models priced above the cheap tier; `--json` for machine-readable output.
 - `providers` — list configured providers and their credential status.
 - `config` — show resolved config and its source (file vs env vs default).
 - `run` — start the TUI explicitly (same as bare invocation).
@@ -63,9 +65,9 @@ Three ways to drive the same core:
 
 Native adapters:
 
-- **Groq** — primary free-tier default, fast.
+- **Groq** — primary default, free tier, fast.
 - **Gemini** — Google AI Studio free tier.
-- **OpenRouter** — aggregates many free models.
+- **OpenRouter** — aggregates many free and cheap models.
 - **Surplus** — [OI]-compatible endpoint at `api.surplusintelligence.ai`.
 
 Generic adapters:
@@ -106,12 +108,16 @@ Rules that hold in every mode:
 
 ## 7. Cost control
 
-- Free-tier providers are the defaults; small models are tried first.
+- Models are banded by price: **free** (both rates zero), **cheap** (both rates
+  at or under $1 per million tokens), **paid** (anything dearer), and
+  **unknown** (the provider published no rates). `models` lists free and cheap
+  only; `--all` lifts the filter.
+- Free and cheap providers are the defaults; small models are tried first.
 - Context is trimmed to fit the model window, oldest turns first.
 - Output tokens are capped per request.
 - A daily request cap plus a running usage counter, surfaced by `/usage`.
-- On a quota or rate-limit error, fall back to the next configured free
-  provider automatically and note the switch in the transcript.
+- On a quota or rate-limit error, fall back to the next configured provider
+  automatically and note the switch in the transcript.
 
 ## 8. Configuration
 

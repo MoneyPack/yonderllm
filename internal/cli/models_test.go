@@ -2,12 +2,14 @@
 //
 // The catalogue command is the one read-only path that still talks to a
 // backend, so these tests lean on the stub's /models endpoint rather than its
-// chat stream. Two properties get the most attention. The first is the free
-// tier filter: yonderllm hides paid models by default precisely so nobody
-// spends money by accident, and the empty-catalogue wording has to tell
-// "nothing at all" apart from "nothing free". The second is the JSON contract,
-// which is a published shape and must not drift when an internal field is
-// renamed.
+// chat stream. Two properties get the most attention. The first is the price
+// tier filter: yonderllm shows free and cheap models by default and hides
+// anything dearer, precisely so nobody spends real money by accident, and the
+// empty-catalogue wording has to tell "nothing at all" apart from "nothing
+// affordable". The second is the JSON contract, which is a published shape and
+// must not drift when an internal field is renamed — in particular pricing is
+// omitted rather than zeroed when a provider publishes no rates, so silence is
+// never mistaken for free.
 package cli
 
 import (
@@ -15,9 +17,8 @@ import (
 	"testing"
 )
 
-// paidCatalogue is the default stub catalogue. The chat-completions /models
-// endpoint carries no free-tier signal, so every model it reports is paid as
-// far as the adapter is concerned; tests that want table output pass --all.
+// The default stub catalogue spans two tiers: one cheap model and one paid one,
+// so a plain --all listing proves both render.
 func TestModelsListsTheCatalogueWithAll(t *testing.T) {
 	h := newHarness(t, newStub(t))
 
@@ -25,22 +26,39 @@ func TestModelsListsTheCatalogueWithAll(t *testing.T) {
 
 	wantCode(t, r, 0)
 	wantContains(t, "stdout", r.stdout,
-		"MODEL", "NAME", "CONTEXT", "TIER",
+		"MODEL", "NAME", "CONTEXT", "PRICE/1M", "TIER",
 		"llama-3.1-8b-instant",
 		"llama-3.3-70b-versatile",
 	)
 }
 
-// Without --all the filter removes everything, and the message has to point at
-// the flag rather than leaving the user thinking the provider is broken.
+// Without --all the cheap model survives and the paid one is dropped. This is
+// the whole point of the default: a run costs pennies at most.
 func TestModelsHidesPaidModelsByDefault(t *testing.T) {
 	h := newHarness(t, newStub(t))
 
 	r := h.run(t, "models")
 
 	wantCode(t, r, 0)
-	wantContains(t, "stdout", r.stdout, "groq reports no free-tier models. Try --all.")
-	wantNotContains(t, "stdout", r.stdout, "llama-3.1-8b-instant", "MODEL")
+	wantContains(t, "stdout", r.stdout, "MODEL", "llama-3.1-8b-instant", "cheap")
+	wantNotContains(t, "stdout", r.stdout, "llama-3.3-70b-versatile")
+}
+
+// When the filter removes everything the message has to point at the flag
+// rather than leaving the user thinking the provider is broken.
+func TestModelsReportsNothingAffordable(t *testing.T) {
+	s := newStub(t)
+	s.models = []stubModel{
+		{ID: "expensive-one", ContextWindow: 8192, Pricing: paidPricing()},
+		{ID: "expensive-two", ContextWindow: 8192, Pricing: paidPricing()},
+	}
+	h := newHarness(t, s)
+
+	r := h.run(t, "models")
+
+	wantCode(t, r, 0)
+	wantContains(t, "stdout", r.stdout, "groq reports no free or cheap models. Try --all.")
+	wantNotContains(t, "stdout", r.stdout, "expensive-one", "MODEL")
 }
 
 // An empty catalogue under --all is a different situation and says so.
@@ -91,14 +109,45 @@ func TestModelsRendersContextWindows(t *testing.T) {
 	wantContains(t, "stdout", r.stdout, "128K", "32K", "30000", "unknown")
 }
 
-// Every model the stub reports is paid, so the tier column says so plainly.
+// The tier column names each price band rather than leaving the reader to
+// divide the rates themselves, so both of the stub's tiers must appear.
 func TestModelsLabelsTheTier(t *testing.T) {
 	h := newHarness(t, newStub(t))
 
 	r := h.run(t, "models", "--all")
 
 	wantCode(t, r, 0)
-	wantContains(t, "stdout", r.stdout, "paid")
+	wantContains(t, "stdout", r.stdout, "cheap", "paid")
+}
+
+// A model the provider prices at zero is genuinely free, and is labelled that
+// way rather than lumped in with the cheap band.
+func TestModelsLabelsAFreeModel(t *testing.T) {
+	s := newStub(t)
+	s.models = []stubModel{{ID: "gratis", ContextWindow: 8192, Pricing: freePricing()}}
+	h := newHarness(t, s)
+
+	r := h.run(t, "models")
+
+	wantCode(t, r, 0)
+	row := findLine(t, r.stdout, "gratis")
+	wantContains(t, "row", row, "free")
+	wantNotContains(t, "row", row, "unknown")
+}
+
+// A provider that reports no rates leaves the tier unknown. Silence must not be
+// read as free, so such a model is hidden until --all asks for everything.
+func TestModelsLabelsAnUnpricedModelUnknown(t *testing.T) {
+	s := newStub(t)
+	s.models = []stubModel{{ID: "silent-rates", ContextWindow: 8192}}
+	h := newHarness(t, s)
+
+	r := h.run(t, "models", "--all")
+
+	wantCode(t, r, 0)
+	row := findLine(t, r.stdout, "silent-rates")
+	wantContains(t, "row", row, "unknown")
+	wantNotContains(t, "row", row, "free")
 }
 
 // A provider that supplies no label leaves the name column filled with the id
@@ -204,8 +253,17 @@ func TestModelsJSON(t *testing.T) {
 	if first.ContextWindow != 131072 {
 		t.Errorf("first context_window = %d, want 131072", first.ContextWindow)
 	}
-	if first.Free {
-		t.Error("first model reported free, want paid")
+	if first.Tier != "cheap" {
+		t.Errorf("first tier = %q, want %q", first.Tier, "cheap")
+	}
+	if first.Pricing == nil {
+		t.Fatal("first model has no pricing member, want the stub's cheap rates")
+	}
+	if first.Pricing.PromptUSDPerMillion != 0.07 {
+		t.Errorf("first prompt rate = %v, want 0.07 per million", first.Pricing.PromptUSDPerMillion)
+	}
+	if first.Pricing.CompletionUSDPerMillion != 0.30 {
+		t.Errorf("first completion rate = %v, want 0.30 per million", first.Pricing.CompletionUSDPerMillion)
 	}
 	if !first.Active {
 		t.Error("configured model not marked active in JSON")
@@ -234,16 +292,44 @@ func TestModelsJSONEmptyCatalogueIsAnArray(t *testing.T) {
 	}
 }
 
-// The filter applies to JSON exactly as it does to the table.
-func TestModelsJSONHonoursTheFreeFilter(t *testing.T) {
+// The tier filter applies to JSON exactly as it does to the table: the cheap
+// model survives without --all and the paid one does not.
+func TestModelsJSONHonoursTheTierFilter(t *testing.T) {
 	h := newHarness(t, newStub(t))
 
 	r := h.run(t, "models", "--json")
 
 	wantCode(t, r, 0)
 	doc := decodeJSON[wireCatalogue](t, r.stdout)
-	if len(doc.Models) != 0 {
-		t.Errorf("models length = %d, want 0 without --all", len(doc.Models))
+	if len(doc.Models) != 1 {
+		t.Fatalf("models length = %d, want 1 without --all\n--- stdout ---\n%s", len(doc.Models), r.stdout)
+	}
+	if doc.Models[0].ID != "llama-3.1-8b-instant" {
+		t.Errorf("surviving model = %q, want the cheap one", doc.Models[0].ID)
+	}
+}
+
+// An unpriced model omits the pricing member entirely rather than reporting
+// zeroes, because a zero rate is a claim that the model is free.
+func TestModelsJSONOmitsUnknownPricing(t *testing.T) {
+	s := newStub(t)
+	s.models = []stubModel{{ID: "silent-rates", ContextWindow: 8192}}
+	h := newHarness(t, s)
+
+	r := h.run(t, "models", "--all", "--json")
+
+	wantCode(t, r, 0)
+	wantNotContains(t, "stdout", r.stdout, "prompt_usd_per_million")
+
+	doc := decodeJSON[wireCatalogue](t, r.stdout)
+	if len(doc.Models) != 1 {
+		t.Fatalf("models length = %d, want 1\n--- stdout ---\n%s", len(doc.Models), r.stdout)
+	}
+	if doc.Models[0].Pricing != nil {
+		t.Errorf("pricing = %+v, want it omitted for an unpriced model", doc.Models[0].Pricing)
+	}
+	if doc.Models[0].Tier != "unknown" {
+		t.Errorf("tier = %q, want %q", doc.Models[0].Tier, "unknown")
 	}
 }
 

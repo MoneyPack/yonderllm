@@ -48,9 +48,37 @@ type stub struct {
 	seen   bool
 }
 
+// stubModel mirrors the subset of a chat-completions catalogue entry the
+// adapter reads. Pricing is a pointer so a test can withhold it entirely and
+// exercise the unknown tier, which is the shape real backends that publish no
+// rates return.
 type stubModel struct {
-	ID            string `json:"id"`
-	ContextWindow int    `json:"context_window,omitempty"`
+	ID            string       `json:"id"`
+	ContextWindow int          `json:"context_window,omitempty"`
+	Pricing       *stubPricing `json:"pricing,omitempty"`
+}
+
+// stubPricing carries the decimal per-token strings real backends send.
+type stubPricing struct {
+	Prompt     string `json:"prompt"`
+	Completion string `json:"completion"`
+}
+
+// cheapPricing is comfortably under the cheap threshold: $0.07 and $0.30 per
+// million tokens.
+func cheapPricing() *stubPricing {
+	return &stubPricing{Prompt: "0.00000007", Completion: "0.00000030"}
+}
+
+// paidPricing is comfortably over it: $2.00 and $4.00 per million tokens.
+func paidPricing() *stubPricing {
+	return &stubPricing{Prompt: "0.00000200", Completion: "0.00000400"}
+}
+
+// freePricing is a genuinely-free published rate, which is not the same as no
+// rate at all.
+func freePricing() *stubPricing {
+	return &stubPricing{Prompt: "0", Completion: "0"}
 }
 
 // newStub starts a backend that streams the given text as a single content
@@ -75,8 +103,8 @@ func newStubWithFrames(t *testing.T, frames []string) *stub {
 	s := &stub{
 		frames: frames,
 		models: []stubModel{
-			{ID: "llama-3.1-8b-instant", ContextWindow: 131072},
-			{ID: "llama-3.3-70b-versatile", ContextWindow: 32768},
+			{ID: "llama-3.1-8b-instant", ContextWindow: 131072, Pricing: cheapPricing()},
+			{ID: "llama-3.3-70b-versatile", ContextWindow: 32768, Pricing: paidPricing()},
 		},
 	}
 

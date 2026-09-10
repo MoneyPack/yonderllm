@@ -218,11 +218,42 @@ func finishReason(s string) FinishReason {
 type modelList struct {
 	Data []struct {
 		ID string `json:"id"`
+		// Name is the human-readable label. Not every provider publishes
+		// one, so the ID stands in when it is missing.
+		Name string `json:"name"`
 		// Providers disagree on the name of the window field, so both
 		// spellings we have seen are accepted.
 		ContextWindow int `json:"context_window"`
 		ContextLength int `json:"context_length"`
+		// Pricing quotes per-token rates as decimal strings, small enough
+		// that JSON numbers would arrive in exponent form. Providers that
+		// publish no prices simply omit the object.
+		Pricing struct {
+			Prompt     string `json:"prompt"`
+			Completion string `json:"completion"`
+		} `json:"pricing"`
 	} `json:"data"`
+}
+
+// parsePricing reads the quoted per-token rates for one catalogue entry.
+//
+// Both rates must be present and parse for the result to count as known. A
+// listing that quotes only one of them tells us too little to band the model:
+// filling the other in as zero would read as free or cheap on no evidence,
+// whereas [TierUnknown] says exactly what we know and still shows the model.
+func parsePricing(prompt, completion string) Pricing {
+	if prompt == "" || completion == "" {
+		return Pricing{}
+	}
+	in, err := strconv.ParseFloat(prompt, 64)
+	if err != nil {
+		return Pricing{}
+	}
+	out, err := strconv.ParseFloat(completion, 64)
+	if err != nil {
+		return Pricing{}
+	}
+	return Pricing{Known: true, Prompt: in, Completion: out}
 }
 
 // Models enumerates what the backend offers.
@@ -254,12 +285,15 @@ func (p *ChatCompat) Models(ctx context.Context) ([]Model, error) {
 		if window == 0 {
 			window = m.ContextLength
 		}
+		name := m.Name
+		if name == "" {
+			name = m.ID
+		}
 		models = append(models, Model{
 			ID:            m.ID,
-			Name:          m.ID,
+			Name:          name,
 			ContextWindow: window,
-			// Whether a model is free depends on the account's tier, which
-			// the listing does not report, so this stays false here.
+			Pricing:       parsePricing(m.Pricing.Prompt, m.Pricing.Completion),
 		})
 	}
 	return models, nil

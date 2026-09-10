@@ -108,17 +108,102 @@ func TestContextLabel(t *testing.T) {
 func TestTierLabel(t *testing.T) {
 	cases := []struct {
 		name string
-		free bool
+		tier provider.Tier
 		want string
 	}{
-		{"free tier", true, "free"},
-		{"paid tier", false, "paid"},
+		{"free passes through", provider.TierFree, "free"},
+		{"cheap passes through", provider.TierCheap, "cheap"},
+		{"paid passes through", provider.TierPaid, "paid"},
+		{"unknown passes through", provider.TierUnknown, "unknown"},
+		{"an unrecognised tier reads as unknown", provider.Tier("bogus"), "unknown"},
+		{"the zero tier reads as unknown", provider.Tier(""), "unknown"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tierLabel(tc.free); got != tc.want {
-				t.Errorf("tierLabel(%t) = %q, want %q", tc.free, got, tc.want)
+			if got := tierLabel(tc.tier); got != tc.want {
+				t.Errorf("tierLabel(%q) = %q, want %q", string(tc.tier), got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPerMillion(t *testing.T) {
+	cases := []struct {
+		name string
+		rate float64
+		want float64
+	}{
+		{"zero stays zero", 0, 0},
+		{"a cheap prompt rate scales up", 0.00000007, 0.07},
+		{"a paid completion rate scales up", 0.000004, 4},
+		{"a whole-dollar per-token rate scales up", 1, 1e6},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := perMillion(tc.rate)
+			if diff := got - tc.want; diff > 1e-9 || diff < -1e-9 {
+				t.Errorf("perMillion(%g) = %g, want %g", tc.rate, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRateLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		rate float64
+		want string
+	}{
+		{"a genuinely free rate is a plain zero", 0, "0"},
+		{"a cheap prompt rate keeps two decimals", 0.00000007, "0.07"},
+		{"a cheap completion rate keeps two decimals", 0.0000003, "0.30"},
+		{"a paid rate keeps two decimals", 0.000004, "4.00"},
+		{"a rate below a hundredth of a cent rounds to zeroes", 0.000000001, "0.00"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rateLabel(tc.rate); got != tc.want {
+				t.Errorf("rateLabel(%g) = %q, want %q", tc.rate, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPriceLabel(t *testing.T) {
+	cases := []struct {
+		name    string
+		pricing provider.Pricing
+		want    string
+	}{
+		{
+			name:    "an unpriced model reads as unknown, not as free",
+			pricing: provider.Pricing{},
+			want:    "unknown",
+		},
+		{
+			name:    "a known zero price reads as free on both halves",
+			pricing: provider.Pricing{Known: true},
+			want:    "0 / 0",
+		},
+		{
+			name:    "input and output are shown separately",
+			pricing: provider.Pricing{Known: true, Prompt: 0.00000007, Completion: 0.0000003},
+			want:    "0.07 / 0.30",
+		},
+		{
+			name:    "a priced input with a free output still prints both",
+			pricing: provider.Pricing{Known: true, Prompt: 0.000002},
+			want:    "2.00 / 0",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := priceLabel(tc.pricing); got != tc.want {
+				t.Errorf("priceLabel(%+v) = %q, want %q", tc.pricing, got, tc.want)
 			}
 		})
 	}

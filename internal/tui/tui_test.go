@@ -33,7 +33,12 @@ type stubProvider struct {
 func (p *stubProvider) Name() string { return p.name }
 
 func (p *stubProvider) Models(ctx context.Context) ([]provider.Model, error) {
-	return []provider.Model{{ID: "stub-1", Name: "Stub One", ContextWindow: 8192, Free: true}}, nil
+	return []provider.Model{{
+		ID:            "stub-1",
+		Name:          "Stub One",
+		ContextWindow: 8192,
+		Pricing:       provider.Pricing{Known: true},
+	}}, nil
 }
 
 func (p *stubProvider) Stream(ctx context.Context, req provider.Request) iter.Seq2[provider.Chunk, error] {
