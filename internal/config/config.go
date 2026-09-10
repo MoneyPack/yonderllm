@@ -96,6 +96,11 @@ func defaults() Config {
 				BaseURL:   "https://openrouter.ai/api/v1",
 				APIKeyEnv: "OPENROUTER_API_KEY",
 			},
+			"surplus": {
+				BaseURL:   "https://api.surplusintelligence.ai/v1",
+				Model:     "gpt-5.6-sol",
+				APIKeyEnv: "SURPLUS_API_KEY",
+			},
 		},
 	}
 }

@@ -66,6 +66,7 @@ Native adapters:
 - **Groq** — primary free-tier default, fast.
 - **Gemini** — Google AI Studio free tier.
 - **OpenRouter** — aggregates many free models.
+- **Surplus** — [OI]-compatible endpoint at `api.surplusintelligence.ai`.
 
 Generic adapters:
 

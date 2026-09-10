@@ -360,6 +360,11 @@ base_url    = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 # model     = "meta-llama/llama-3.3-70b-instruct:free"
 
+[providers.surplus]
+base_url    = "https://api.surplusintelligence.ai/v1"
+api_key_env = "SURPLUS_API_KEY"
+model       = "gpt-5.6-sol"
+
 # A local or self-hosted OpenAI-compatible server needs no key:
 # [providers.local]
 # base_url = "http://localhost:8080/v1"

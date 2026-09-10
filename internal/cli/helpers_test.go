@@ -184,6 +184,7 @@ func scrubEnv(t *testing.T) {
 		"GROQ_API_KEY",
 		"GEMINI_API_KEY",
 		"OPENROUTER_API_KEY",
+		"SURPLUS_API_KEY",
 	} {
 		t.Setenv(key, "")
 	}

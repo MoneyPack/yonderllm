@@ -102,6 +102,7 @@ $ yonderllm providers
 * groq        active    -      GROQ_API_KEY        no key
   gemini      fallback  -      GEMINI_API_KEY      no key
   openrouter  fallback  -      OPENROUTER_API_KEY  ready
+  surplus     -         -      SURPLUS_API_KEY     no key
 
 Set the listed environment variable to enable a provider.
 ```
@@ -211,14 +212,15 @@ These apply to every command and to the TUI.
 
 ## Providers and API keys
 
-Three providers are configured out of the box. All three have a free tier;
+Four providers are configured out of the box. Each is reached over HTTP, and
 none of them is asked for a card by yonderllm.
 
-| Provider | Environment variable | Base URL | Suggested free model |
+| Provider | Environment variable | Base URL | Suggested model |
 | --- | --- | --- | --- |
 | `groq` *(default)* | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta` | `gemini-2.0-flash` |
 | `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `meta-llama/llama-3.3-70b-instruct:free` |
+| `surplus` | `SURPLUS_API_KEY` | `https://api.surplusintelligence.ai/v1` | `gpt-5.6-sol` |
 
 Keys are read from the environment only. yonderllm never writes a key to its
 config file, and the config file names the *variable*, not the secret — so it
@@ -312,6 +314,11 @@ model       = "gemini-2.0-flash"
 base_url    = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 model       = "meta-llama/llama-3.3-70b-instruct:free"
+
+[providers.surplus]
+base_url    = "https://api.surplusintelligence.ai/v1"
+api_key_env = "SURPLUS_API_KEY"
+model       = "gpt-5.6-sol"
 
 # Any OpenAI-compatible endpoint works. Omit api_key_env if it needs no key.
 # [providers.local]

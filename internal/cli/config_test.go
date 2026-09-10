@@ -34,6 +34,7 @@ func TestConfigShowTable(t *testing.T) {
 		"groq",
 		"gemini",
 		"openrouter",
+		"surplus",
 		testKeyEnv,
 		"ready",
 		"no key",
@@ -69,13 +70,14 @@ func TestConfigShowProviderOrder(t *testing.T) {
 	groq := strings.Index(r.stdout, "\ngroq")
 	gemini := strings.Index(r.stdout, "\ngemini")
 	openrouter := strings.Index(r.stdout, "\nopenrouter")
+	surplus := strings.Index(r.stdout, "\nsurplus")
 
-	if groq < 0 || gemini < 0 || openrouter < 0 {
+	if groq < 0 || gemini < 0 || openrouter < 0 || surplus < 0 {
 		t.Fatalf("not every provider row is present\n--- stdout ---\n%s", r.stdout)
 	}
-	if !(groq < gemini && gemini < openrouter) {
-		t.Errorf("provider rows are out of order: groq=%d gemini=%d openrouter=%d\n--- stdout ---\n%s",
-			groq, gemini, openrouter, r.stdout)
+	if !(groq < gemini && gemini < openrouter && openrouter < surplus) {
+		t.Errorf("provider rows are out of order: groq=%d gemini=%d openrouter=%d surplus=%d\n--- stdout ---\n%s",
+			groq, gemini, openrouter, surplus, r.stdout)
 	}
 }
 

@@ -35,6 +35,79 @@ func TestLoadDefaultsWithoutFile(t *testing.T) {
 	}
 }
 
+// TestBuiltInProvidersAreConfigured pins the catalogue that ships with the
+// binary. Every provider carries a base URL and the name of its key variable;
+// a default model is deliberately left empty except for surplus, whose model
+// ids are not discoverable without a credential.
+func TestBuiltInProvidersAreConfigured(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "absent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := map[string]ProviderConfig{
+		"groq": {
+			BaseURL:   "https://api.groq.com/openai/v1",
+			APIKeyEnv: "GROQ_API_KEY",
+		},
+		"gemini": {
+			BaseURL:   "https://generativelanguage.googleapis.com/v1beta",
+			APIKeyEnv: "GEMINI_API_KEY",
+		},
+		"openrouter": {
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+		},
+		"surplus": {
+			BaseURL:   "https://api.surplusintelligence.ai/v1",
+			Model:     "gpt-5.6-sol",
+			APIKeyEnv: "SURPLUS_API_KEY",
+		},
+	}
+
+	if len(cfg.Providers) != len(want) {
+		t.Errorf("provider count: got %d, want %d", len(cfg.Providers), len(want))
+	}
+	for name, w := range want {
+		got, ok := cfg.Providers[name]
+		if !ok {
+			t.Errorf("%s: not present in the built-in catalogue", name)
+			continue
+		}
+		if got.BaseURL != w.BaseURL {
+			t.Errorf("%s base_url: got %q, want %q", name, got.BaseURL, w.BaseURL)
+		}
+		if got.Model != w.Model {
+			t.Errorf("%s model: got %q, want %q", name, got.Model, w.Model)
+		}
+		if got.APIKeyEnv != w.APIKeyEnv {
+			t.Errorf("%s api_key_env: got %q, want %q", name, got.APIKeyEnv, w.APIKeyEnv)
+		}
+	}
+}
+
+// TestSurplusKeyResolvesFromEnv is the surplus counterpart to the groq case:
+// naming SURPLUS_API_KEY is enough for the provider to count as usable, and
+// the key itself is never written back into the struct's exported fields.
+func TestSurplusKeyResolvesFromEnv(t *testing.T) {
+	t.Setenv("SURPLUS_API_KEY", "surplus-test-key")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "absent.toml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Credentialed("surplus") {
+		t.Error("surplus should be credentialed once SURPLUS_API_KEY is set")
+	}
+	surplus, ok := cfg.Providers["surplus"]
+	if !ok {
+		t.Fatal("surplus missing from the built-in catalogue")
+	}
+	if key := surplus.APIKey(); key != "surplus-test-key" {
+		t.Errorf("APIKey(): got %q, want the value from the environment", key)
+	}
+}
+
 // TestPartialProviderTableMerges is the case that motivates field-by-field
 // merging: setting only a model must not wipe the built-in base URL.
 func TestPartialProviderTableMerges(t *testing.T) {

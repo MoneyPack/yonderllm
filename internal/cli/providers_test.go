@@ -94,6 +94,7 @@ func TestProvidersOmitsAdviceWhenAllReady(t *testing.T) {
 	h := newHarness(t, newStub(t))
 	t.Setenv("GEMINI_API_KEY", "gemini-key")
 	t.Setenv("OPENROUTER_API_KEY", "openrouter-key")
+	t.Setenv("SURPLUS_API_KEY", "surplus-key")
 
 	r := h.run(t, "providers")
 	wantCode(t, r, 0)
