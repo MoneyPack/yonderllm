@@ -31,7 +31,7 @@ func TestEstimateTokens(t *testing.T) {
 
 func TestTotalTokensAddsFramingPerMessage(t *testing.T) {
 	msgs := []provider.Message{
-		{Role: provider.RoleUser, Content: "abcd"},     // 1 + 4
+		{Role: provider.RoleUser, Content: "abcd"},      // 1 + 4
 		{Role: provider.RoleAssistant, Content: "efgh"}, // 1 + 4
 	}
 	if got, want := TotalTokens(msgs), 10; got != want {

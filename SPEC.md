@@ -59,7 +59,11 @@ Three ways to drive the same core:
 
 ### Slash commands (TUI)
 
-`/model`, `/clear`, `/usage`, `/help`.
+`/model`, `/clear`, `/read`, `/search`, `/usage`, `/help`.
+
+`/read` and `/search` are the first commands gated by the permission policy:
+both call `perm.Policy.Check` through `internal/workspace` and are refused in
+`chat` mode.
 
 ## 5. Providers
 

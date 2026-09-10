@@ -376,9 +376,16 @@ Bare `yonderllm` opens it. The transcript scrolls above; you type below.
 /model <provider> <model>
                        switch both at once
 /clear                 forget the conversation so far
+/read <file>           show a file from the workspace
+/search <text>         find a literal string across the workspace
 /usage                 show requests used against the daily cap
 /help                  show this
 ```
+
+`/read` and `/search` are governed by `--mode`: both are refused in `chat` and
+allowed in `code` and `agent`. Neither ever prompts, so the permission model is
+enforced end to end without an approval dialog. Paths are relative to the
+directory yonderllm was started in and cannot escape it.
 
 ### Keys
 
@@ -459,12 +466,13 @@ The policy is enforced in one place, `internal/perm`, so the rules can be read
 and tested as a unit rather than inferred from call sites. Escalation is always
 an explicit act: nothing promotes itself out of `chat`.
 
-> **Status.** The permission model is implemented and tested; the workspace
-> tools it governs are not yet built. `internal/workspace` is currently an
-> empty package. In this release `code` and `agent` are accepted, validated,
-> and displayed, but no mode reads, writes, or executes anything — every mode
-> behaves as `chat` in practice. The table above describes the policy that
-> the tools will be wired into, not capabilities that exist today.
+> **Status.** Read and search are wired through the policy and enforced:
+> `internal/workspace` performs every read and search behind
+> `perm.Policy.Check`, and `/read` and `/search` surface a refusal rather than
+> a result in `chat` mode. Write and execute are not built yet, so the `ask`
+> cells in the table above describe the policy the remaining tools will be
+> wired into, not capabilities that exist today. No mode writes a file or runs
+> a command.
 
 ---
 
@@ -478,7 +486,7 @@ internal/provider/  HTTP clients for OpenAI-compatible endpoints
 internal/session/   conversation state, streaming, fallback chain, usage cap
 internal/perm/      the permission policy
 internal/tui/       the Bubble Tea interface
-internal/workspace/ reserved for filesystem tools; currently empty
+internal/workspace/ containment-checked file reads and searches
 ```
 
 Built on [Cobra](https://github.com/spf13/cobra),

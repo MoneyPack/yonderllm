@@ -1,0 +1,528 @@
+package workspace
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"yonderllm/internal/perm"
+)
+
+// open builds a workspace over a fresh temporary tree. The tree is per-test so
+// that a search sees only what the test put there.
+func open(t *testing.T, mode perm.Mode) (*Workspace, string) {
+	t.Helper()
+	dir := t.TempDir()
+	w, err := Open(dir, perm.New(mode))
+	if err != nil {
+		t.Fatalf("Open(%q) failed: %v", dir, err)
+	}
+	t.Cleanup(func() { w.Close() })
+	return w, dir
+}
+
+// write places a file in the tree, creating any directories it names.
+func write(t *testing.T, dir, rel, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll for %q failed: %v", rel, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile %q failed: %v", rel, err)
+	}
+	return path
+}
+
+// wantDenied asserts that err is the refusal a mode produces for an action,
+// including the sentence a user would read.
+func wantDenied(t *testing.T, err error, mode perm.Mode, action perm.Action) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("want a refusal for %s in %s mode, got nil", action, mode)
+	}
+	var denied *perm.DeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("want *perm.DeniedError, got %T: %v", err, err)
+	}
+	if denied.Mode != mode || denied.Action != action {
+		t.Errorf("want refusal of %s in %s mode, got %s in %s mode",
+			action, mode, denied.Action, denied.Mode)
+	}
+	want := action.String() + " is not permitted in " + mode.String() + " mode"
+	if got := err.Error(); got != want {
+		t.Errorf("refusal reads %q, want %q", got, want)
+	}
+}
+
+func TestReadFileReturnsContentsInModesThatAllowReading(t *testing.T) {
+	for _, mode := range []perm.Mode{perm.Code, perm.Agent} {
+		t.Run(mode.String(), func(t *testing.T) {
+			w, dir := open(t, mode)
+			write(t, dir, "notes/todo.md", "remember the milk\n")
+
+			data, err := w.ReadFile("notes/todo.md")
+			if err != nil {
+				t.Fatalf("ReadFile failed: %v", err)
+			}
+			if got := string(data); got != "remember the milk\n" {
+				t.Errorf("ReadFile returned %q, want %q", got, "remember the milk\n")
+			}
+		})
+	}
+}
+
+func TestReadFileIsRefusedInChatMode(t *testing.T) {
+	w, dir := open(t, perm.Chat)
+	write(t, dir, "todo.md", "remember the milk\n")
+
+	data, err := w.ReadFile("todo.md")
+	wantDenied(t, err, perm.Chat, perm.Read)
+	if data != nil {
+		t.Errorf("a refused read returned %d bytes, want none", len(data))
+	}
+}
+
+func TestSearchIsRefusedInChatMode(t *testing.T) {
+	w, dir := open(t, perm.Chat)
+	write(t, dir, "todo.md", "remember the milk\n")
+
+	matches, err := w.Search("milk")
+	wantDenied(t, err, perm.Chat, perm.Search)
+	if matches != nil {
+		t.Errorf("a refused search returned %d matches, want none", len(matches))
+	}
+}
+
+func TestAutoApproveDoesNotChangeReadingOrSearching(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "todo.md", "remember the milk\n")
+
+	w, err := Open(dir, perm.NewAutoApprove(perm.Chat))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer w.Close()
+
+	if _, err := w.ReadFile("todo.md"); err == nil {
+		t.Error("auto-approve granted a read that chat mode forbids")
+	}
+	if _, err := w.Search("milk"); err == nil {
+		t.Error("auto-approve granted a search that chat mode forbids")
+	}
+}
+
+func TestSearchMatchesLiteralsIgnoringCase(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "sub/notes.md", "first line\nMILK and honey\nlast line\n")
+
+	matches, err := w.Search("  Milk  ")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Search returned %d matches, want 1: %+v", len(matches), matches)
+	}
+	got := matches[0]
+	if got.Path != "sub/notes.md" {
+		t.Errorf("match path is %q, want %q", got.Path, "sub/notes.md")
+	}
+	if got.Line != 2 {
+		t.Errorf("match line is %d, want 2", got.Line)
+	}
+	if got.Text != "MILK and honey" {
+		t.Errorf("match text is %q, want %q", got.Text, "MILK and honey")
+	}
+}
+
+func TestSearchTreatsPunctuationAsTextNotSyntax(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "perm.go", "func (p Policy) Check(a Action) Decision {\n")
+
+	matches, err := w.Search("func (p Policy)")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("a query with parentheses found %d matches, want 1", len(matches))
+	}
+}
+
+func TestSearchStripsCarriageReturns(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "dos.txt", "milk\r\n")
+
+	matches, err := w.Search("milk")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Search returned %d matches, want 1", len(matches))
+	}
+	if matches[0].Text != "milk" {
+		t.Errorf("match text is %q, want %q without the carriage return",
+			matches[0].Text, "milk")
+	}
+}
+
+func TestSearchNeedsSomethingToLookFor(t *testing.T) {
+	w, _ := open(t, perm.Code)
+
+	for _, query := range []string{"", "   ", "\t\n"} {
+		matches, err := w.Search(query)
+		if err == nil {
+			t.Fatalf("Search(%q) was accepted, want a refusal", query)
+		}
+		if got, want := err.Error(), "workspace: search needs something to look for"; got != want {
+			t.Errorf("Search(%q) failed with %q, want %q", query, got, want)
+		}
+		if matches != nil {
+			t.Errorf("Search(%q) returned %d matches alongside an error", query, len(matches))
+		}
+	}
+}
+
+func TestSearchSkipsMachineryAndVendoredTrees(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "mine.txt", "milk\n")
+	for name := range skipDirs {
+		write(t, dir, name+"/theirs.txt", "milk\n")
+	}
+
+	matches, err := w.Search("milk")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Search returned %d matches, want only the one outside a skipped tree: %+v",
+			len(matches), matches)
+	}
+	if matches[0].Path != "mine.txt" {
+		t.Errorf("match path is %q, want %q", matches[0].Path, "mine.txt")
+	}
+}
+
+func TestSearchSearchesADirectoryNamedLikeASkippedOneAtTheRoot(t *testing.T) {
+	// The root itself is never pruned, even when a temporary directory
+	// happens to be called something on the list.
+	dir := filepath.Join(t.TempDir(), "vendor")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	write(t, dir, "mine.txt", "milk\n")
+
+	w, err := Open(dir, perm.New(perm.Code))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer w.Close()
+
+	matches, err := w.Search("milk")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("a root named vendor yielded %d matches, want 1", len(matches))
+	}
+}
+
+func TestSearchStopsAtTheMatchLimit(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "a.txt", strings.Repeat("milk\n", maxMatches+50))
+	write(t, dir, "b.txt", strings.Repeat("milk\n", 10))
+
+	matches, err := w.Search("milk")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != maxMatches {
+		t.Errorf("Search returned %d matches, want the cap of %d", len(matches), maxMatches)
+	}
+}
+
+func TestSearchTruncatesAnOverlongLine(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "minified.js", "milk"+strings.Repeat("x", maxLineBytes+100)+"\n")
+
+	matches, err := w.Search("milk")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Search returned %d matches, want 1", len(matches))
+	}
+	text := matches[0].Text
+	if !strings.HasSuffix(text, "...") {
+		t.Errorf("a truncated line ends %q, want it to end in an ellipsis", text[len(text)-3:])
+	}
+	if len(text) != maxLineBytes+3 {
+		t.Errorf("a truncated line is %d bytes, want %d", len(text), maxLineBytes+3)
+	}
+}
+
+func TestSearchIgnoresFilesItCannotUsefullyRead(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "text.txt", "milk\n")
+	write(t, dir, "image.png", "milk\x00\n")
+	write(t, dir, "dump.sql", "milk\n"+strings.Repeat("x", maxFileBytes))
+
+	matches, err := w.Search("milk")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Search returned %d matches, want only the text file: %+v", len(matches), matches)
+	}
+	if matches[0].Path != "text.txt" {
+		t.Errorf("match path is %q, want %q", matches[0].Path, "text.txt")
+	}
+}
+
+func TestReadFileRefusesNamesOutsideTheWorkspace(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "inside.txt", "milk\n")
+	outside := filepath.Join(filepath.Dir(dir), "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile outside the root failed: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(outside) })
+
+	for _, name := range []string{
+		"../outside.txt",
+		"..",
+		"sub/../../outside.txt",
+		outside,
+		"/etc/passwd",
+	} {
+		data, err := w.ReadFile(name)
+		if err == nil {
+			t.Errorf("ReadFile(%q) was allowed, want a refusal", name)
+		}
+		if data != nil {
+			t.Errorf("ReadFile(%q) returned %d bytes despite failing", name, len(data))
+		}
+	}
+}
+
+func TestReadFileRefusesAnAbsoluteNameByName(t *testing.T) {
+	w, _ := open(t, perm.Code)
+
+	_, err := w.ReadFile("/etc/passwd")
+	if err == nil {
+		t.Fatal("an absolute name was accepted, want a refusal")
+	}
+	want := "workspace: /etc/passwd is outside the workspace"
+	if got := err.Error(); got != want {
+		t.Errorf("ReadFile failed with %q, want %q", got, want)
+	}
+}
+
+func TestReadFileNeedsAName(t *testing.T) {
+	w, _ := open(t, perm.Code)
+
+	for _, name := range []string{"", "   "} {
+		_, err := w.ReadFile(name)
+		if err == nil {
+			t.Fatalf("ReadFile(%q) was accepted, want a refusal", name)
+		}
+		if got, want := err.Error(), "workspace: no file named"; got != want {
+			t.Errorf("ReadFile(%q) failed with %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestReadFileRefusesASymlinkLeavingTheWorkspace(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	outside := filepath.Join(filepath.Dir(dir), "outside-target.txt")
+	if err := os.WriteFile(outside, []byte("secret\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile outside the root failed: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(outside) })
+
+	link := filepath.Join(dir, "escape.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		// Unprivileged Windows accounts cannot create symlinks. The
+		// containment this test describes is os.Root's, not ours.
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	if _, err := w.ReadFile("escape.txt"); err == nil {
+		t.Error("reading through a symlink out of the workspace was allowed, want a refusal")
+	}
+}
+
+func TestReadFileFollowsASymlinkInsideTheWorkspace(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "real.txt", "milk\n")
+
+	link := filepath.Join(dir, "alias.txt")
+	if err := os.Symlink(filepath.Join(dir, "real.txt"), link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	data, err := w.ReadFile("alias.txt")
+	if err != nil {
+		t.Fatalf("ReadFile through an internal symlink failed: %v", err)
+	}
+	if got := string(data); got != "milk\n" {
+		t.Errorf("ReadFile returned %q, want %q", got, "milk\n")
+	}
+}
+
+func TestReadFileRefusesADirectory(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "sub/file.txt", "milk\n")
+
+	_, err := w.ReadFile("sub")
+	if err == nil {
+		t.Fatal("reading a directory was allowed, want a refusal")
+	}
+	want := "workspace: read sub: is a directory"
+	if got := err.Error(); got != want {
+		t.Errorf("ReadFile failed with %q, want %q", got, want)
+	}
+}
+
+func TestReadFileRefusesAFileLargerThanTheLimit(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "big.log", strings.Repeat("x", maxFileBytes+1))
+
+	_, err := w.ReadFile("big.log")
+	if err == nil {
+		t.Fatal("reading an oversize file was allowed, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("ReadFile failed with %q, want it to mention the size limit", err)
+	}
+}
+
+func TestReadFileAcceptsAFileExactlyAtTheLimit(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "edge.log", strings.Repeat("x", maxFileBytes))
+
+	data, err := w.ReadFile("edge.log")
+	if err != nil {
+		t.Fatalf("a file of exactly %d bytes was refused: %v", maxFileBytes, err)
+	}
+	if len(data) != maxFileBytes {
+		t.Errorf("ReadFile returned %d bytes, want %d", len(data), maxFileBytes)
+	}
+}
+
+func TestReadFileRefusesBinaryContent(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "image.png", "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+	_, err := w.ReadFile("image.png")
+	if err == nil {
+		t.Fatal("reading a binary file was allowed, want a refusal")
+	}
+	want := "workspace: read image.png: not a text file"
+	if got := err.Error(); got != want {
+		t.Errorf("ReadFile failed with %q, want %q", got, want)
+	}
+}
+
+func TestReadFileReportsAMissingFile(t *testing.T) {
+	w, _ := open(t, perm.Code)
+
+	_, err := w.ReadFile("absent.txt")
+	if err == nil {
+		t.Fatal("reading a missing file succeeded, want a refusal")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("ReadFile failed with %v, want it to wrap os.ErrNotExist", err)
+	}
+	if !strings.HasPrefix(err.Error(), "workspace: read absent.txt: ") {
+		t.Errorf("ReadFile failed with %q, want it to name the file", err)
+	}
+}
+
+func TestReadFileAcceptsASlashSeparatedName(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "a/b/c.txt", "milk\n")
+
+	if _, err := w.ReadFile("a/b/c.txt"); err != nil {
+		t.Errorf("a slash-separated name was refused: %v", err)
+	}
+}
+
+func TestOpenReportsADirectoryItCannotUse(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent")
+
+	w, err := Open(missing, perm.New(perm.Code))
+	if err == nil {
+		w.Close()
+		t.Fatal("opening a missing directory succeeded, want an error")
+	}
+	if !strings.HasPrefix(err.Error(), "workspace: open "+missing+": ") {
+		t.Errorf("Open failed with %q, want it to name the directory", err)
+	}
+	if w != nil {
+		t.Error("Open returned a workspace alongside an error")
+	}
+}
+
+func TestCurrentOpensTheWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "todo.md", "remember the milk\n")
+	t.Chdir(dir)
+
+	w, err := Current(perm.New(perm.Code))
+	if err != nil {
+		t.Fatalf("Current failed: %v", err)
+	}
+	defer w.Close()
+
+	data, err := w.ReadFile("todo.md")
+	if err != nil {
+		t.Fatalf("ReadFile in the working directory failed: %v", err)
+	}
+	if got := string(data); got != "remember the milk\n" {
+		t.Errorf("ReadFile returned %q, want %q", got, "remember the milk\n")
+	}
+}
+
+func TestNameReportsTheRoot(t *testing.T) {
+	w, dir := open(t, perm.Code)
+
+	if got := w.Name(); got != dir {
+		t.Errorf("Name is %q, want %q", got, dir)
+	}
+}
+
+func TestCloseReleasesTheRoot(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "todo.md", "milk\n")
+	w, err := Open(dir, perm.New(perm.Code))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if _, err := w.ReadFile("todo.md"); err == nil {
+		t.Error("a closed workspace still read a file, want a refusal")
+	}
+}
+
+func TestIsBinaryLooksOnlyAtTheStartOfAFile(t *testing.T) {
+	text := bytes.Repeat([]byte("a"), sniffBytes)
+
+	if isBinary(text) {
+		t.Error("a file of plain text was called binary")
+	}
+	if isBinary(append(bytes.Clone(text), 0)) {
+		t.Errorf("a NUL past the first %d bytes was treated as binary", sniffBytes)
+	}
+	if !isBinary(append(bytes.Clone(text[:sniffBytes-1]), 0)) {
+		t.Error("a NUL within the sniffed prefix was not treated as binary")
+	}
+	if isBinary(nil) {
+		t.Error("an empty file was called binary")
+	}
+}

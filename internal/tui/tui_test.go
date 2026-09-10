@@ -8,7 +8,10 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"iter"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,6 +21,7 @@ import (
 	"yonderllm/internal/perm"
 	"yonderllm/internal/provider"
 	"yonderllm/internal/session"
+	"yonderllm/internal/workspace"
 )
 
 // stubProvider is a provider that replays a fixed list of deltas. It records
@@ -76,17 +80,45 @@ func testConfig() config.Config {
 }
 
 // newTestModel returns a model over a real session backed by p, already sized
-// so that ready is set and the viewport has a width to reflow against.
+// so that ready is set and the viewport has a width to reflow against. The mode
+// is chat, which is the most restrictive: it denies every file action.
 func newTestModel(t *testing.T, p *stubProvider) model {
+	t.Helper()
+	return newTestModelMode(t, p, perm.Chat)
+}
+
+// newTestModelMode is newTestModel with the permission mode chosen by the
+// caller, for the commands that only work outside chat mode.
+func newTestModelMode(t *testing.T, p *stubProvider, mode perm.Mode) model {
 	t.Helper()
 
 	sess := session.New(testConfig(), func(name string) (provider.Provider, error) {
 		return p, nil
 	})
 
-	m := newModel(sess, perm.Chat)
+	m := newModel(sess, mode)
 	m.resize(60, 24)
 	return m
+}
+
+// workspaceDir makes a directory the working directory for the rest of the
+// test, so that workspace.Current opens somewhere known instead of the repo.
+// Files are given as a path relative to the directory mapped to its contents;
+// parent directories are created as needed.
+func workspaceDir(t *testing.T, files map[string]string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	for name, content := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q): %v", path, err)
+		}
+	}
+	t.Chdir(dir)
 }
 
 // step sends one message and returns the model that results, saving every test
@@ -388,7 +420,7 @@ func TestHelpCommand(t *testing.T) {
 	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 
 	text := transcript(m)
-	for _, want := range []string{"/model", "/clear", "/usage", "/help", "ctrl+j", "pgup / pgdn"} {
+	for _, want := range []string{"/model", "/clear", "/read", "/search", "/usage", "/help", "ctrl+j", "pgup / pgdn"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("help missing %q", want)
 		}
@@ -433,6 +465,296 @@ func TestClearCommandResetsBothHalves(t *testing.T) {
 	}
 	if n := len(m.sess.History().Turns()); n != 0 {
 		t.Errorf("history has %d turns after /clear, want 0", n)
+	}
+}
+
+func TestReadCommandShowsAFile(t *testing.T) {
+	workspaceDir(t, map[string]string{"notes.txt": "alpha\nbeta\n"})
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/read notes.txt")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockInfo {
+		t.Errorf("/read block kind = %v, want blockInfo", last.kind)
+	}
+	for _, want := range []string{"notes.txt", "alpha", "beta"} {
+		if !strings.Contains(last.text, want) {
+			t.Errorf("/read output missing %q:\n%s", want, last.text)
+		}
+	}
+	if m.busy {
+		t.Error("/read was sent to a model")
+	}
+}
+
+func TestReadCommandReadsThroughASubdirectory(t *testing.T) {
+	workspaceDir(t, map[string]string{"docs/guide.md": "# heading\n"})
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/read docs/guide.md")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockInfo {
+		t.Fatalf("/read block kind = %v, want blockInfo: %s", last.kind, last.text)
+	}
+	if !strings.Contains(last.text, "# heading") {
+		t.Errorf("/read output missing the file contents:\n%s", last.text)
+	}
+}
+
+// The argument is the raw remainder of the line rather than a parsed field, so
+// a name with a space in it survives.
+func TestReadCommandKeepsSpacesInTheName(t *testing.T) {
+	workspaceDir(t, map[string]string{"two words.txt": "spaced\n"})
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/read two words.txt")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockInfo {
+		t.Fatalf("/read block kind = %v, want blockInfo: %s", last.kind, last.text)
+	}
+	if !strings.Contains(last.text, "spaced") {
+		t.Errorf("/read output missing the file contents:\n%s", last.text)
+	}
+}
+
+func TestReadCommandWithoutAnArgumentShowsUsage(t *testing.T) {
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/read")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockError {
+		t.Errorf("/read block kind = %v, want blockError", last.kind)
+	}
+	if last.text != "usage: /read <file>" {
+		t.Errorf("/read usage text = %q", last.text)
+	}
+}
+
+// Chat mode denies every file action, and the denial has to reach the
+// transcript rather than being silently dropped.
+func TestReadCommandIsDeniedInChatMode(t *testing.T) {
+	workspaceDir(t, map[string]string{"notes.txt": "alpha\n"})
+
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m = typing(m, "/read notes.txt")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockError {
+		t.Errorf("denied /read block kind = %v, want blockError", last.kind)
+	}
+	if last.text != "read is not permitted in chat mode" {
+		t.Errorf("denied /read text = %q", last.text)
+	}
+	if strings.Contains(last.text, "alpha") {
+		t.Error("a denied /read leaked the file contents")
+	}
+}
+
+func TestReadCommandReportsAMissingFile(t *testing.T) {
+	workspaceDir(t, nil)
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/read absent.txt")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockError {
+		t.Errorf("missing file block kind = %v, want blockError", last.kind)
+	}
+	if !strings.Contains(last.text, "workspace: read absent.txt") {
+		t.Errorf("missing file text = %q", last.text)
+	}
+}
+
+func TestReadCommandRejectsAPathOutsideTheWorkspace(t *testing.T) {
+	workspaceDir(t, map[string]string{"notes.txt": "alpha\n"})
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/read ../escape.txt")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockError {
+		t.Errorf("escaping /read block kind = %v, want blockError", last.kind)
+	}
+	if !strings.Contains(last.text, "workspace: read ../escape.txt") {
+		t.Errorf("escaping /read text = %q", last.text)
+	}
+}
+
+func TestFileViewLabelsAnEmptyFile(t *testing.T) {
+	got := fileView("blank.txt", "")
+	if !strings.Contains(got, "blank.txt") || !strings.Contains(got, "(empty file)") {
+		t.Errorf("fileView of an empty file = %q", got)
+	}
+}
+
+// A file of only newlines is empty once the trailing ones are trimmed, so it
+// takes the same branch as a zero-byte file.
+func TestFileViewTreatsTrailingNewlinesAsEmpty(t *testing.T) {
+	if got := fileView("blank.txt", "\n\n\n"); !strings.Contains(got, "(empty file)") {
+		t.Errorf("fileView of only newlines = %q", got)
+	}
+}
+
+func TestFileViewTruncatesALongFile(t *testing.T) {
+	lines := make([]string, 0, maxShownLines+10)
+	for i := range maxShownLines + 10 {
+		lines = append(lines, fmt.Sprintf("line %d", i+1))
+	}
+	got := fileView("long.txt", strings.Join(lines, "\n"))
+
+	if !strings.Contains(got, "line 1\n") {
+		t.Error("fileView dropped the first line")
+	}
+	if !strings.Contains(got, fmt.Sprintf("line %d", maxShownLines)) {
+		t.Errorf("fileView dropped line %d", maxShownLines)
+	}
+	if strings.Contains(got, fmt.Sprintf("line %d", maxShownLines+1)) {
+		t.Errorf("fileView kept line %d, past the cap", maxShownLines+1)
+	}
+	if !strings.Contains(got, "... 10 more lines") {
+		t.Errorf("fileView did not count the lines it withheld:\n%s", got)
+	}
+}
+
+func TestSearchCommandFindsMatches(t *testing.T) {
+	workspaceDir(t, map[string]string{
+		"notes.txt":    "alpha\nbeta needle\n",
+		"docs/more.md": "needle again\n",
+	})
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/search needle")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockInfo {
+		t.Fatalf("/search block kind = %v, want blockInfo: %s", last.kind, last.text)
+	}
+	for _, want := range []string{`2 matches for "needle"`, "notes.txt:2: beta needle", "docs/more.md:1: needle again"} {
+		if !strings.Contains(last.text, want) {
+			t.Errorf("/search output missing %q:\n%s", want, last.text)
+		}
+	}
+	if m.busy {
+		t.Error("/search was sent to a model")
+	}
+}
+
+// Search is literal but case-insensitive, so the query need not match the case
+// of the text it finds.
+func TestSearchCommandIgnoresCase(t *testing.T) {
+	workspaceDir(t, map[string]string{"notes.txt": "Needle here\n"})
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/search NEEDLE")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockInfo {
+		t.Fatalf("/search block kind = %v, want blockInfo: %s", last.kind, last.text)
+	}
+	if !strings.Contains(last.text, "notes.txt:1: Needle here") {
+		t.Errorf("/search output missing the match:\n%s", last.text)
+	}
+}
+
+// The query is the raw remainder of the line, so a phrase keeps its spacing
+// instead of collapsing into one word.
+func TestSearchCommandKeepsSpacesInTheQuery(t *testing.T) {
+	workspaceDir(t, map[string]string{"notes.txt": "two words here\n"})
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/search two words")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockInfo {
+		t.Fatalf("/search block kind = %v, want blockInfo: %s", last.kind, last.text)
+	}
+	if !strings.Contains(last.text, `1 matches for "two words"`) {
+		t.Errorf("/search output missing the phrase query:\n%s", last.text)
+	}
+}
+
+func TestSearchCommandWithoutAnArgumentShowsUsage(t *testing.T) {
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/search")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockError {
+		t.Errorf("/search block kind = %v, want blockError", last.kind)
+	}
+	if last.text != "usage: /search <text>" {
+		t.Errorf("/search usage text = %q", last.text)
+	}
+}
+
+func TestSearchCommandIsDeniedInChatMode(t *testing.T) {
+	workspaceDir(t, map[string]string{"notes.txt": "needle\n"})
+
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m = typing(m, "/search needle")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockError {
+		t.Errorf("denied /search block kind = %v, want blockError", last.kind)
+	}
+	if last.text != "search is not permitted in chat mode" {
+		t.Errorf("denied /search text = %q", last.text)
+	}
+}
+
+// Finding nothing is an answer rather than a failure, so it is a notice.
+func TestSearchCommandReportsNoMatchesAsANotice(t *testing.T) {
+	workspaceDir(t, map[string]string{"notes.txt": "alpha\n"})
+
+	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
+	m = typing(m, "/search needle")
+	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockNotice {
+		t.Errorf("empty /search block kind = %v, want blockNotice", last.kind)
+	}
+	if last.text != `no matches for "needle"` {
+		t.Errorf("empty /search text = %q", last.text)
+	}
+}
+
+func TestMatchViewTruncatesManyMatches(t *testing.T) {
+	matches := make([]workspace.Match, 0, maxShownLines+3)
+	for i := range maxShownLines + 3 {
+		matches = append(matches, workspace.Match{
+			Path: "notes.txt",
+			Line: i + 1,
+			Text: fmt.Sprintf("hit %d", i+1),
+		})
+	}
+	got := matchView("hit", matches)
+
+	if !strings.Contains(got, fmt.Sprintf("%d matches for %q", len(matches), "hit")) {
+		t.Errorf("matchView heading did not count every match:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("notes.txt:%d:", maxShownLines)) {
+		t.Errorf("matchView dropped match %d", maxShownLines)
+	}
+	if strings.Contains(got, fmt.Sprintf("notes.txt:%d:", maxShownLines+1)) {
+		t.Errorf("matchView kept match %d, past the cap", maxShownLines+1)
+	}
+	if !strings.Contains(got, "... 3 more matches") {
+		t.Errorf("matchView did not count the matches it withheld:\n%s", got)
 	}
 }
 

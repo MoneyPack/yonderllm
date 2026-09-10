@@ -7,10 +7,21 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"yonderllm/internal/perm"
+	"yonderllm/internal/workspace"
 )
+
+// maxShownLines caps how much of a file /read puts on screen. A file the
+// workspace will hand over can still be far longer than anyone wants to scroll
+// past to reach the prompt again, and a truncated view that says so is more use
+// than a complete one that buries the conversation.
+const maxShownLines = 200
 
 // helpText is the reference shown by /help. It lists the keys as well as the
 // commands, because the keys are the half of the interface that has nowhere
@@ -22,6 +33,8 @@ const helpText = `Commands
   /model <provider> <model>
                          switch both at once
   /clear                 forget the conversation so far
+  /read <file>           show a file from the working directory
+  /search <text>         find that text in the working directory
   /usage                 show requests used against the daily cap
   /help                  show this
 
@@ -49,11 +62,28 @@ func (m model) runCommand(text string) (tea.Model, tea.Cmd) {
 		m.append(block{kind: blockInfo, text: m.usageReport()})
 	case "/model":
 		m.applyModel(args)
+	case "/read":
+		m.readFile(remainder(text))
+	case "/search":
+		m.searchFiles(remainder(text))
 	default:
 		m.append(block{kind: blockError, text: fmt.Sprintf("unknown command %q; try /help", name)})
 	}
 
 	return m, nil
+}
+
+// remainder returns everything after the command word, with only the space that
+// separated the two removed. Commands that take a filename or a phrase are
+// given this rather than parsed fields, because splitting on whitespace would
+// quietly lose a path with a space in it and would turn a multi-word search
+// into its first word.
+func remainder(text string) string {
+	i := strings.IndexFunc(text, unicode.IsSpace)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(text[i+1:])
 }
 
 // clearSession drops both halves of the conversation: the history the model is
@@ -66,6 +96,118 @@ func (m *model) clearSession() {
 		{kind: blockNotice, text: "conversation cleared"},
 	}
 	m.refresh()
+}
+
+// readFile shows a file from the working directory, if this mode is allowed to
+// read one. The workspace is opened for the command and closed again rather
+// than held open for the session, because the working directory is only of
+// interest while a command is using it, and a handle kept across a whole
+// session would outlive whatever made it relevant.
+func (m *model) readFile(name string) {
+	if name == "" {
+		m.append(block{kind: blockError, text: "usage: /read <file>"})
+		return
+	}
+
+	ws, err := workspace.Current(perm.New(m.mode))
+	if err != nil {
+		m.append(block{kind: blockError, text: err.Error()})
+		return
+	}
+	defer ws.Close()
+
+	data, err := ws.ReadFile(name)
+	if err != nil {
+		m.append(block{kind: blockError, text: err.Error()})
+		return
+	}
+
+	m.append(block{kind: blockInfo, text: fileView(name, string(data))})
+}
+
+// fileView renders a file under a heading naming it, shortened to the first
+// maxShownLines lines if it runs longer. The heading carries the name because
+// the transcript scrolls, and a wall of text whose origin has scrolled away is
+// hard to place.
+func fileView(name, content string) string {
+	content = strings.TrimRight(content, "\n")
+
+	var b strings.Builder
+	b.WriteString(name)
+
+	if content == "" {
+		b.WriteString("\n  (empty file)")
+		return b.String()
+	}
+
+	lines := strings.Split(content, "\n")
+	shown := lines
+	if len(shown) > maxShownLines {
+		shown = shown[:maxShownLines]
+	}
+
+	for _, line := range shown {
+		b.WriteString("\n")
+		b.WriteString(line)
+	}
+
+	if len(shown) < len(lines) {
+		b.WriteString("\n\n... " + strconv.Itoa(len(lines)-len(shown)) + " more lines")
+	}
+
+	return b.String()
+}
+
+// searchFiles looks for literal text across the working directory, if this mode
+// is allowed to search it.
+func (m *model) searchFiles(query string) {
+	if query == "" {
+		m.append(block{kind: blockError, text: "usage: /search <text>"})
+		return
+	}
+
+	ws, err := workspace.Current(perm.New(m.mode))
+	if err != nil {
+		m.append(block{kind: blockError, text: err.Error()})
+		return
+	}
+	defer ws.Close()
+
+	matches, err := ws.Search(query)
+	if err != nil {
+		m.append(block{kind: blockError, text: err.Error()})
+		return
+	}
+	if len(matches) == 0 {
+		// Finding nothing is an answer, not a failure, so it is reported
+		// as a notice rather than an error.
+		m.append(block{kind: blockNotice, text: fmt.Sprintf("no matches for %q", query)})
+		return
+	}
+
+	m.append(block{kind: blockInfo, text: matchView(query, matches)})
+}
+
+// matchView renders search results as path:line: text, one per line, under a
+// heading counting them.
+func matchView(query string, matches []workspace.Match) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d matches for %q", len(matches), query)
+
+	shown := matches
+	if len(shown) > maxShownLines {
+		shown = shown[:maxShownLines]
+	}
+
+	for _, match := range shown {
+		fmt.Fprintf(&b, "\n%s:%d: %s", match.Path, match.Line, match.Text)
+	}
+
+	if len(shown) < len(matches) {
+		b.WriteString("\n\n... " + strconv.Itoa(len(matches)-len(shown)) + " more matches")
+	}
+
+	return b.String()
 }
 
 // applyModel handles /model in its four forms.
