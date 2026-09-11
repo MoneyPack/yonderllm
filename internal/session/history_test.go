@@ -42,6 +42,27 @@ func TestTotalTokensAddsFramingPerMessage(t *testing.T) {
 	}
 }
 
+func TestTotalTokensCountsToolCalls(t *testing.T) {
+	// An assistant turn that only asks to run tools carries no text, so the
+	// whole cost of the turn lives in the call names and arguments.
+	msgs := []provider.Message{{
+		Role: provider.RoleAssistant,
+		ToolCalls: []provider.ToolCall{
+			{ID: "1", Name: "read", Arguments: `{"path":"a"}`}, // 1 + 3 + 4
+			{ID: "2", Name: "grep", Arguments: `{}`},           // 1 + 1 + 4
+		},
+	}}
+	// 0 content + 4 framing, then 8 and 6 for the calls.
+	if got, want := TotalTokens(msgs), 18; got != want {
+		t.Errorf("TotalTokens of a tool-call turn = %d, want %d", got, want)
+	}
+
+	bare := []provider.Message{{Role: provider.RoleAssistant}}
+	if TotalTokens(msgs) <= TotalTokens(bare) {
+		t.Error("tool calls cost nothing: a long call chain would slip past the budget uncounted")
+	}
+}
+
 func TestHistorySystemPromptIsSeparateFromTurns(t *testing.T) {
 	var h History
 	h.SetSystem("be terse")
@@ -194,5 +215,75 @@ func TestRedactable(t *testing.T) {
 				t.Errorf("redactable(%q) leaked the credential: %q", c.in, got)
 			}
 		})
+	}
+}
+
+// toolTurnFixture builds a history whose middle holds a tool exchange: a user
+// question, the assistant's call, the result answering it, then a plain turn
+// either side. Costs are 5, 10, 5, 5, 5 tokens for a total of 30.
+func toolTurnFixture(t *testing.T) *History {
+	t.Helper()
+
+	var h History
+	h.Append(provider.RoleUser, "aaaa")
+	h.AppendToolCalls("", []provider.ToolCall{{ID: "call-1", Name: "read", Arguments: "{}"}})
+	h.AppendToolResult("call-1", "rrrr")
+	h.Append(provider.RoleUser, "bbbb")
+	h.Append(provider.RoleAssistant, "cccc")
+
+	if got, want := TotalTokens(h.Turns()), 30; got != want {
+		t.Fatalf("fixture cost = %d tokens, want %d", got, want)
+	}
+	return &h
+}
+
+func TestHistoryPromptNeverOrphansAToolResult(t *testing.T) {
+	h := toolTurnFixture(t)
+
+	// A budget of 16 fits the three newest turns, which would cut between the
+	// call and the result that answers it.
+	got := h.Prompt(16)
+	if len(got) != 2 {
+		t.Fatalf("Prompt(16) returned %d messages (%v), want 2", len(got), contents(got))
+	}
+	if got[0].Role != provider.RoleUser || got[0].Content != "bbbb" {
+		t.Errorf("Prompt(16) starts with %s %q, want user \"bbbb\"", got[0].Role, got[0].Content)
+	}
+}
+
+func TestHistoryPromptKeepsResultWithItsCall(t *testing.T) {
+	h := toolTurnFixture(t)
+
+	// A budget of 25 fits everything but the oldest user turn, so the call and
+	// its result both survive.
+	got := h.Prompt(25)
+	if len(got) != 4 {
+		t.Fatalf("Prompt(25) returned %d messages (%v), want 4", len(got), contents(got))
+	}
+	if len(got[0].ToolCalls) != 1 {
+		t.Fatalf("Prompt(25) starts with %+v, want the assistant tool call", got[0])
+	}
+	if got[1].Role != provider.RoleTool || got[1].ToolCallID != "call-1" {
+		t.Errorf("call is not followed by its result: got %+v", got[1])
+	}
+}
+
+func TestHistoryPromptLeadingToolResultInvariant(t *testing.T) {
+	h := toolTurnFixture(t)
+	h.SetSystem("sys")
+
+	// Whatever the budget, the first turn sent must never be a dangling tool
+	// result: providers reject a result whose id matches no call in the request.
+	for budget := 1; budget <= 40; budget++ {
+		msgs := h.Prompt(budget)
+		for _, m := range msgs {
+			if m.Role == provider.RoleSystem {
+				continue
+			}
+			if m.Role == provider.RoleTool {
+				t.Errorf("Prompt(%d) leads with an orphaned tool result: %v", budget, contents(msgs))
+			}
+			break
+		}
 	}
 }

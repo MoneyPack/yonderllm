@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
 	"slices"
@@ -557,5 +558,511 @@ func TestSessionClearDropsTurnsButKeepsUsage(t *testing.T) {
 	}
 	if got := s.Usage().Requests(); got != before {
 		t.Errorf("requests = %d after Clear, want %d kept", got, before)
+	}
+}
+
+// scriptedProvider answers each request from the next entry in its script, so a
+// test can drive an exchange that takes several rounds. A script shorter than
+// the number of requests repeats its last entry, which is how a model that
+// never stops asking for tools is written.
+type scriptedProvider struct {
+	name   string
+	script [][]provider.Chunk
+	reqs   []provider.Request
+}
+
+func (s *scriptedProvider) Name() string { return s.name }
+
+func (s *scriptedProvider) Models(ctx context.Context) ([]provider.Model, error) {
+	return []provider.Model{{ID: "scripted-model", Name: "Scripted", Pricing: provider.Pricing{Known: true}}}, nil
+}
+
+func (s *scriptedProvider) Stream(ctx context.Context, req provider.Request) iter.Seq2[provider.Chunk, error] {
+	s.reqs = append(s.reqs, req)
+	round := len(s.reqs) - 1
+	if round >= len(s.script) {
+		round = len(s.script) - 1
+	}
+	chunks := s.script[round]
+	return func(yield func(provider.Chunk, error) bool) {
+		for _, c := range chunks {
+			if !yield(c, nil) {
+				return
+			}
+		}
+	}
+}
+
+// resolverOf maps any set of adapters onto their names, so a test can mix a
+// scripted provider with one that only fails.
+func resolverOf(ps ...provider.Provider) Resolver {
+	byName := make(map[string]provider.Provider, len(ps))
+	for _, p := range ps {
+		byName[p.Name()] = p
+	}
+	return func(name string) (provider.Provider, error) {
+		p, ok := byName[name]
+		if !ok {
+			return nil, errors.New("no such provider: " + name)
+		}
+		return p, nil
+	}
+}
+
+// toolCallChunk is the shape an adapter hands up once it has reassembled a
+// call: whole, and carrying the finish reason that explains it.
+func toolCallChunk(id, name, arguments string) provider.Chunk {
+	return provider.Chunk{
+		ToolCalls: []provider.ToolCall{{ID: id, Name: name, Arguments: arguments}},
+		Finish:    provider.FinishTool,
+	}
+}
+
+// stubTool wraps a run function in the definition the model would be shown.
+func stubTool(name string, run func(ctx context.Context, arguments string) (string, error)) Tool {
+	return Tool{
+		Definition: provider.Tool{
+			Name:        name,
+			Description: "stub " + name,
+			Parameters:  json.RawMessage(`{"type":"object"}`),
+		},
+		Run: run,
+	}
+}
+
+// exchange is everything one Ask produced, in the order it arrived.
+type exchange struct {
+	deltas  []string
+	notices []string
+	runs    []ToolRun
+	usage   *provider.Usage
+	done    bool
+}
+
+// collectTools drains an exchange, keeping the tool events collect discards.
+func collectTools(seq iter.Seq2[Event, error]) (exchange, error) {
+	var ex exchange
+	for ev, err := range seq {
+		if err != nil {
+			return ex, err
+		}
+		if ev.Delta != "" {
+			ex.deltas = append(ex.deltas, ev.Delta)
+		}
+		if ev.Notice != "" {
+			ex.notices = append(ex.notices, ev.Notice)
+		}
+		if ev.Tool != nil {
+			ex.runs = append(ex.runs, *ev.Tool)
+		}
+		if ev.Done {
+			ex.done = true
+			ex.usage = ev.Usage
+		}
+	}
+	return ex, nil
+}
+
+// toolNames lists what a request advertised, which is how a test checks the
+// model was offered the tools rather than merely that some were registered.
+func toolNames(req provider.Request) []string {
+	out := make([]string, 0, len(req.Tools))
+	for _, t := range req.Tools {
+		out = append(out, t.Name)
+	}
+	return out
+}
+
+// A tool call is not an answer: the session has to run the tool, hand the result
+// back and let the model continue, and only the prose from that second round is
+// the reply. This is the whole point of the loop, so it is asserted end to end.
+func TestAskRunsAToolThenStreamsTheReply(t *testing.T) {
+	var gotArgs string
+	p := &scriptedProvider{
+		name: "groq",
+		script: [][]provider.Chunk{
+			{
+				toolCallChunk("call-1", "read", `{"path":"go.mod"}`),
+				{Usage: &provider.Usage{PromptTokens: 10, CompletionTokens: 4}},
+			},
+			append(textChunks("The module ", "is yonderllm."),
+				provider.Chunk{Finish: provider.FinishStop, Usage: &provider.Usage{PromptTokens: 20, CompletionTokens: 3}}),
+		},
+	}
+	s := New(testConfig("groq"), resolverOf(p))
+	s.SetTools(stubTool("read", func(ctx context.Context, arguments string) (string, error) {
+		gotArgs = arguments
+		return "module yonderllm", nil
+	}))
+
+	ex, err := collectTools(s.Ask(context.Background(), "what module is this"))
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if !ex.done {
+		t.Error("exchange did not finish")
+	}
+	if want := []string{"The module ", "is yonderllm."}; !slices.Equal(ex.deltas, want) {
+		t.Errorf("deltas = %v, want %v", ex.deltas, want)
+	}
+
+	// The arguments reach the tool as the model wrote them, unvalidated.
+	if want := `{"path":"go.mod"}`; gotArgs != want {
+		t.Errorf("tool received arguments %q, want %q", gotArgs, want)
+	}
+
+	// A run is bracketed: one event before it starts so the transcript can
+	// show it working, one after so it can show what came back.
+	if len(ex.runs) != 2 {
+		t.Fatalf("got %d tool events, want 2 (start and finish)", len(ex.runs))
+	}
+	start, done := ex.runs[0], ex.runs[1]
+	if start.Finished {
+		t.Error("first tool event is marked finished, want the start of the run")
+	}
+	if start.ID != "call-1" || start.Name != "read" {
+		t.Errorf("start event = %+v, want call-1/read", start)
+	}
+	if !done.Finished {
+		t.Error("second tool event is not marked finished")
+	}
+	if done.Result != "module yonderllm" || done.Err != "" {
+		t.Errorf("finish event = %+v, want the tool's result and no error", done)
+	}
+
+	// Two requests, and the second must carry the result back or the model
+	// has nothing to continue from.
+	if len(p.reqs) != 2 {
+		t.Fatalf("provider saw %d requests, want 2", len(p.reqs))
+	}
+	if want := []string{"read"}; !slices.Equal(toolNames(p.reqs[0]), want) {
+		t.Errorf("first request advertised %v, want %v", toolNames(p.reqs[0]), want)
+	}
+	sent := p.reqs[1].Messages
+	result := sent[len(sent)-1]
+	if result.Role != provider.RoleTool || result.ToolCallID != "call-1" || result.Content != "module yonderllm" {
+		t.Errorf("last message of the second request = %+v, want the tool result for call-1", result)
+	}
+
+	// History has to read back as the exchange happened: question, the call,
+	// its result, then the answer.
+	turns := s.History().Turns()
+	if len(turns) != 4 {
+		t.Fatalf("history has %d turns, want 4", len(turns))
+	}
+	if turns[1].Role != provider.RoleAssistant || len(turns[1].ToolCalls) != 1 {
+		t.Errorf("turn 2 = %+v, want the assistant's tool call", turns[1])
+	}
+	if turns[2].Role != provider.RoleTool || turns[2].ToolCallID != "call-1" {
+		t.Errorf("turn 3 = %+v, want the tool result", turns[2])
+	}
+	if got := turns[3].Content; got != "The module is yonderllm." {
+		t.Errorf("final turn = %q, want the streamed reply", got)
+	}
+
+	// The tokens reported at the end are what the question cost in total,
+	// not what its last leg cost.
+	if ex.usage == nil {
+		t.Fatal("done event carried no usage")
+	}
+	if ex.usage.PromptTokens != 30 || ex.usage.CompletionTokens != 7 {
+		t.Errorf("usage = %+v, want both rounds summed (30/7)", *ex.usage)
+	}
+}
+
+// The daily cap counts questions, not remote requests: the user asked once and
+// the number of rounds is the session's decision. The per-provider tally still
+// counts every request, because that is what the free tier is spending.
+func TestAskChargesOneReservationForAWholeToolExchange(t *testing.T) {
+	p := &scriptedProvider{
+		name: "groq",
+		script: [][]provider.Chunk{
+			{
+				toolCallChunk("call-1", "read", "{}"),
+				{Usage: &provider.Usage{PromptTokens: 10, CompletionTokens: 4}},
+			},
+			append(textChunks("done"),
+				provider.Chunk{Finish: provider.FinishStop, Usage: &provider.Usage{PromptTokens: 20, CompletionTokens: 1}}),
+		},
+	}
+	s := New(testConfig("groq"), resolverOf(p))
+	s.SetTools(stubTool("read", func(ctx context.Context, arguments string) (string, error) {
+		return "contents", nil
+	}))
+
+	if _, err := collectTools(s.Ask(context.Background(), "read it")); err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+
+	if got := s.Usage().Requests(); got != 1 {
+		t.Errorf("capped requests = %d, want 1 for one question", got)
+	}
+	if got := s.Usage().ByProvider()["groq"].Requests; got != 2 {
+		t.Errorf("groq requests = %d, want 2, one per round", got)
+	}
+	if got := s.Usage().ByProvider()["groq"].PromptTokens; got != 30 {
+		t.Errorf("groq prompt tokens = %d, want 30 across both rounds", got)
+	}
+}
+
+// The round bound is a nudge, not a wall. On the last round the tools are
+// withheld so the model has to answer in prose, and any call it makes anyway is
+// ignored rather than obeyed — otherwise the exchange could end with no answer.
+func TestAskWithholdsToolsOnTheLastRound(t *testing.T) {
+	runs := 0
+	// One round, repeated: a model that asks for a tool every single time.
+	p := &scriptedProvider{
+		name: "groq",
+		script: [][]provider.Chunk{{
+			{Delta: "still looking"},
+			toolCallChunk("call-x", "read", "{}"),
+		}},
+	}
+	s := New(testConfig("groq"), resolverOf(p))
+	s.SetTools(stubTool("read", func(ctx context.Context, arguments string) (string, error) {
+		runs++
+		return "nothing useful", nil
+	}))
+
+	ex, err := collectTools(s.Ask(context.Background(), "keep going"))
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if !ex.done {
+		t.Error("exchange did not finish, want the last round to answer")
+	}
+	if len(p.reqs) != maxToolRounds {
+		t.Fatalf("provider saw %d requests, want %d", len(p.reqs), maxToolRounds)
+	}
+	if got := toolNames(p.reqs[maxToolRounds-2]); len(got) != 1 {
+		t.Errorf("second-to-last request advertised %v, want the tools still offered", got)
+	}
+	if got := p.reqs[maxToolRounds-1].Tools; got != nil {
+		t.Errorf("last request advertised %v, want no tools", toolNames(p.reqs[maxToolRounds-1]))
+	}
+	if want := maxToolRounds - 1; runs != want {
+		t.Errorf("tool ran %d times, want %d, once per round but the last", runs, want)
+	}
+
+	// The prose from the final round is the reply, and the call it made
+	// alongside left no trace.
+	turns := s.History().Turns()
+	final := turns[len(turns)-1]
+	if final.Role != provider.RoleAssistant || final.Content != "still looking" || len(final.ToolCalls) != 0 {
+		t.Errorf("final turn = %+v, want the last round's prose with no calls", final)
+	}
+}
+
+// Models occasionally invent a tool. The recoverable answer is to tell the model
+// so as the call's result, because it is the only party that can correct itself.
+func TestAskReportsAnUnknownToolBackToTheModel(t *testing.T) {
+	p := &scriptedProvider{
+		name: "groq",
+		script: [][]provider.Chunk{
+			{toolCallChunk("call-1", "compile", "{}")},
+			append(textChunks("sorry"), provider.Chunk{Finish: provider.FinishStop}),
+		},
+	}
+	s := New(testConfig("groq"), resolverOf(p))
+	s.SetTools(stubTool("read", func(ctx context.Context, arguments string) (string, error) {
+		return "contents", nil
+	}))
+
+	ex, err := collectTools(s.Ask(context.Background(), "compile it"))
+	if err != nil {
+		t.Fatalf("Ask returned error: %v, want the exchange to survive an invented tool", err)
+	}
+	if !ex.done {
+		t.Error("exchange did not finish")
+	}
+	if len(ex.runs) != 2 {
+		t.Fatalf("got %d tool events, want 2", len(ex.runs))
+	}
+	want := `no tool named "compile" is available`
+	if got := ex.runs[1].Err; got != want {
+		t.Errorf("finish event error = %q, want %q", got, want)
+	}
+
+	turns := s.History().Turns()
+	if got := turns[2]; got.Role != provider.RoleTool || got.Content != want {
+		t.Errorf("turn 3 = %+v, want the failure recorded as the call's result", got)
+	}
+}
+
+// A tool that fails is reported as its own result rather than raised as an
+// error: the exchange continues, and the model gets to see what went wrong. A
+// call left without a matching result would be rejected outright next round.
+func TestAskReportsAFailingToolAsItsResult(t *testing.T) {
+	p := &scriptedProvider{
+		name: "groq",
+		script: [][]provider.Chunk{
+			{toolCallChunk("call-1", "read", `{"path":"ghost.txt"}`)},
+			append(textChunks("no such file"), provider.Chunk{Finish: provider.FinishStop}),
+		},
+	}
+	s := New(testConfig("groq"), resolverOf(p))
+	s.SetTools(stubTool("read", func(ctx context.Context, arguments string) (string, error) {
+		return "", errors.New("workspace: no file named ghost.txt")
+	}))
+
+	ex, err := collectTools(s.Ask(context.Background(), "read ghost.txt"))
+	if err != nil {
+		t.Fatalf("Ask returned error: %v, want a tool failure to stay inside the exchange", err)
+	}
+	if len(ex.runs) != 2 {
+		t.Fatalf("got %d tool events, want 2", len(ex.runs))
+	}
+	done := ex.runs[1]
+	if done.Err != "workspace: no file named ghost.txt" || done.Result != "" {
+		t.Errorf("finish event = %+v, want the error and no result", done)
+	}
+	if got := s.History().Turns()[2]; got.Role != provider.RoleTool || got.Content != done.Err {
+		t.Errorf("turn 3 = %+v, want the error handed back as the result", got)
+	}
+	if !ex.done {
+		t.Error("exchange did not finish after a failing tool")
+	}
+}
+
+// A provider that was skipped over once will be skipped over again. Retrying a
+// spent free tier on every round would burn the allowance to learn what the
+// previous round already proved, so the chain narrows to whoever answered.
+func TestAskNarrowsTheChainAfterAToolRound(t *testing.T) {
+	spent := &fakeProvider{name: "groq", err: provider.ErrQuota}
+	answering := &scriptedProvider{
+		name: "gemini",
+		script: [][]provider.Chunk{
+			{toolCallChunk("call-1", "read", "{}")},
+			append(textChunks("answered"), provider.Chunk{Finish: provider.FinishStop}),
+		},
+	}
+	s := New(testConfig("groq", "gemini"), resolverOf(spent, answering))
+	s.SetTools(stubTool("read", func(ctx context.Context, arguments string) (string, error) {
+		return "contents", nil
+	}))
+
+	ex, err := collectTools(s.Ask(context.Background(), "read it"))
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if spent.calls != 1 {
+		t.Errorf("exhausted provider was tried %d times, want 1", spent.calls)
+	}
+	if len(answering.reqs) != 2 {
+		t.Errorf("answering provider saw %d requests, want 2", len(answering.reqs))
+	}
+	// Only the first round has a fallback to announce; by the second, gemini
+	// heads the chain and there is nothing to explain.
+	if len(ex.notices) != 1 {
+		t.Errorf("notices = %v, want one fallback announcement", ex.notices)
+	}
+	if len(ex.notices) == 1 && !strings.Contains(ex.notices[0], "falling back to gemini") {
+		t.Errorf("notice = %q, want it to name the provider taking over", ex.notices[0])
+	}
+}
+
+// A consumer that stops mid-run must not have the tool run behind its back, and
+// the request it already spent is not refunded: the remote call was made.
+func TestAskStopsWhenConsumerBreaksOnAToolEvent(t *testing.T) {
+	runs := 0
+	p := &scriptedProvider{
+		name:   "groq",
+		script: [][]provider.Chunk{{toolCallChunk("call-1", "read", "{}")}},
+	}
+	s := New(testConfig("groq"), resolverOf(p))
+	s.SetTools(stubTool("read", func(ctx context.Context, arguments string) (string, error) {
+		runs++
+		return "contents", nil
+	}))
+
+	var seen int
+	for ev, err := range s.Ask(context.Background(), "read it") {
+		if err != nil {
+			t.Fatalf("Ask returned error: %v", err)
+		}
+		if ev.Tool != nil {
+			seen++
+			break
+		}
+	}
+
+	if seen != 1 {
+		t.Fatalf("saw %d tool events before breaking, want 1", seen)
+	}
+	if runs != 0 {
+		t.Errorf("tool ran %d times, want 0: the consumer left before it started", runs)
+	}
+	if got := s.Usage().Requests(); got != 1 {
+		t.Errorf("requests = %d, want the spent request kept at 1", got)
+	}
+}
+
+// SetTools replaces the whole set rather than adding to it, because the set is
+// decided by the permission mode and a mode change has to be able to take a
+// capability away. An empty set must vanish from the request entirely: some
+// providers reject an empty tool list rather than reading it as no tools.
+func TestSetToolsReplacesTheWholeSet(t *testing.T) {
+	noop := func(ctx context.Context, arguments string) (string, error) { return "", nil }
+	s := New(testConfig("groq"), resolverOf())
+
+	if got := s.definitions(); got != nil {
+		t.Errorf("definitions() = %v on a fresh session, want nil", got)
+	}
+
+	s.SetTools(stubTool("read", noop), stubTool("search", noop))
+	got := make([]string, 0, 2)
+	for _, d := range s.definitions() {
+		got = append(got, d.Name)
+	}
+	if want := []string{"read", "search"}; !slices.Equal(got, want) {
+		t.Errorf("definitions() = %v, want %v", got, want)
+	}
+
+	// Narrowing the mode narrows the set, so what was granted can be taken.
+	s.SetTools(stubTool("read", noop))
+	if defs := s.definitions(); len(defs) != 1 || defs[0].Name != "read" {
+		t.Errorf("definitions() = %v after replacing, want just read", defs)
+	}
+
+	s.SetTools()
+	if got := s.definitions(); got != nil {
+		t.Errorf("definitions() = %v after clearing, want nil so the key is omitted", got)
+	}
+}
+
+// The parameter schema is the model's only description of what a tool expects,
+// so it has to reach the provider byte for byte rather than round-tripped
+// through a Go type that might drop a field it does not know about.
+func TestAskPassesToolSchemaThroughUntouched(t *testing.T) {
+	schema := `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`
+	p := &scriptedProvider{
+		name:   "groq",
+		script: [][]provider.Chunk{append(textChunks("ok"), provider.Chunk{Finish: provider.FinishStop})},
+	}
+	s := New(testConfig("groq"), resolverOf(p))
+	s.SetTools(Tool{
+		Definition: provider.Tool{
+			Name:        "read",
+			Description: "read a file from the workspace",
+			Parameters:  json.RawMessage(schema),
+		},
+		Run: func(ctx context.Context, arguments string) (string, error) { return "", nil },
+	})
+
+	if _, err := collectTools(s.Ask(context.Background(), "hi")); err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if len(p.reqs) != 1 {
+		t.Fatalf("provider saw %d requests, want 1", len(p.reqs))
+	}
+	sent := p.reqs[0].Tools
+	if len(sent) != 1 {
+		t.Fatalf("request advertised %d tools, want 1", len(sent))
+	}
+	if got := string(sent[0].Parameters); got != schema {
+		t.Errorf("parameters = %s, want %s", got, schema)
+	}
+	if sent[0].Description != "read a file from the workspace" {
+		t.Errorf("description = %q, want it forwarded", sent[0].Description)
 	}
 }

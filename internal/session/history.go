@@ -34,8 +34,16 @@ func EstimateTokens(s string) int {
 }
 
 // messageTokens estimates one message including its framing overhead.
+//
+// Tool calls are counted as well as content: an assistant turn that asks to
+// run a tool often carries no text at all, and ignoring the arguments would
+// let a long chain of tool calls slip past the budget uncounted.
 func messageTokens(m provider.Message) int {
-	return EstimateTokens(m.Content) + tokensPerMessage
+	total := EstimateTokens(m.Content) + tokensPerMessage
+	for _, c := range m.ToolCalls {
+		total += EstimateTokens(c.Name) + EstimateTokens(c.Arguments) + tokensPerMessage
+	}
+	return total
 }
 
 // TotalTokens estimates the cost of a whole message slice.
@@ -62,9 +70,35 @@ func (h *History) SetSystem(prompt string) { h.system = prompt }
 // System returns the current system prompt.
 func (h *History) System() string { return h.system }
 
-// Append adds a turn to the end of the conversation.
+// Append adds a plain text turn to the end of the conversation.
 func (h *History) Append(role provider.Role, content string) {
 	h.turns = append(h.turns, provider.Message{Role: role, Content: content})
+}
+
+// AppendToolCalls records the assistant turn that asked to run tools.
+//
+// Content is kept even though it is usually empty: some models narrate what
+// they are about to do in the same turn as the call, and dropping that text
+// would leave a gap in the transcript.
+func (h *History) AppendToolCalls(content string, calls []provider.ToolCall) {
+	h.turns = append(h.turns, provider.Message{
+		Role:      provider.RoleAssistant,
+		Content:   content,
+		ToolCalls: calls,
+	})
+}
+
+// AppendToolResult records the outcome of one tool call.
+//
+// The id must be the one from the call being answered. Providers reject a tool
+// result whose id matches no pending call, so a failed tool still has to append
+// a result here — with the error as its content — rather than nothing at all.
+func (h *History) AppendToolResult(id, content string) {
+	h.turns = append(h.turns, provider.Message{
+		Role:       provider.RoleTool,
+		Content:    content,
+		ToolCallID: id,
+	})
 }
 
 // Turns returns a copy of the conversation turns, excluding the system prompt.
@@ -126,7 +160,22 @@ func (h *History) Prompt(budget int) []provider.Message {
 		// Not even the newest turn fits. Send it regardless.
 		keep = len(h.turns) - 1
 	}
-	return append(head, h.turns[keep:]...)
+	return append(head, h.turns[h.firstWholeTurn(keep):]...)
+}
+
+// firstWholeTurn moves keep forward past any tool result whose originating
+// call was trimmed away.
+//
+// A tool result only means something next to the call it answers, and
+// providers reject a result whose id matches no call in the request. Trimming
+// from the oldest end can cut between the two, so the window is advanced until
+// it starts on a turn that stands alone. Dropping a little more context is the
+// cheap failure here; sending an orphaned result fails the request outright.
+func (h *History) firstWholeTurn(keep int) int {
+	for keep < len(h.turns) && h.turns[keep].Role == provider.RoleTool {
+		keep++
+	}
+	return keep
 }
 
 // redactable is a small guard used when history is rendered for display or
