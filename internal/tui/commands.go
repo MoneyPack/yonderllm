@@ -23,9 +23,9 @@ import (
 // than a complete one that buries the conversation.
 const maxShownLines = 200
 
-// helpText is the reference shown by /help. It lists the keys as well as the
-// commands, because the keys are the half of the interface that has nowhere
-// else to be discovered.
+// helpText is the reference shown by /help. It lists the keys and the model's
+// tools as well as the commands, because both are halves of the interface that
+// have nowhere else to be discovered.
 const helpText = `Commands
   /model                 show the provider and model in use
   /model <model>         switch model on the current provider
@@ -37,6 +37,10 @@ const helpText = `Commands
   /search <text>         find that text in the working directory
   /usage                 show requests used against the daily cap
   /help                  show this
+
+Tools (code and agent modes)
+  read_file              the model reads a file from this project
+  search_files           the model searches this project for text
 
 Keys
   enter                  send

@@ -26,6 +26,7 @@ subcommand for when you want an answer without a session.
 - [Providers and API keys](#providers-and-api-keys)
 - [Configuration](#configuration)
 - [The TUI](#the-tui)
+- [Tools](#tools)
 - [Scripting with `run --json`](#scripting-with-run---json)
 - [Modes](#modes)
 - [Project layout](#project-layout)
@@ -404,6 +405,121 @@ Switching model with `/model` keeps the conversation. Only `/clear` discards it.
 
 ---
 
+## Tools
+
+`/read` and `/search` are you looking at the project. Tools are the *model*
+looking at it. In `code` and `agent` mode yonderllm tells the model which
+capabilities it has, and when the model asks for one, yonderllm runs it and
+feeds the result back — without leaving the turn you are already in.
+
+| Tool | What the model gets |
+| --- | --- |
+| `read_file` | One UTF-8 text file, addressed relative to the project root |
+| `search_files` | Every line in the project matching a literal string, with its path |
+
+Both take a single argument and are described to the model by JSON Schema, so a
+malformed call is refused with a sentence the model can act on rather than
+silently mishandled:
+
+```json
+{"name": "read_file",    "arguments": {"path":  "internal/cli/run.go"}}
+{"name": "search_files", "arguments": {"query": "func newSessionFor"}}
+```
+
+Search is literal and case-insensitive — no regular expressions, because a
+model that guesses at a regex dialect wastes a round trip finding out which one
+it got.
+
+### What the model is told
+
+The tool list is built from the permission policy, not filtered after the fact.
+A capability the current mode does not allow is **never described to the
+model** — it cannot ask for what it has not been offered, so a refusal is not
+something the model has to be talked out of.
+
+| Mode | Tools offered |
+| --- | --- |
+| `chat` | none |
+| `code` | `read_file`, `search_files` |
+| `agent` | `read_file`, `search_files` |
+
+Only capabilities the mode marks *allow* are offered. Anything the mode would
+merely *ask* about is withheld, because nothing in this loop can raise a prompt
+yet. That is why reading and searching came first: they are `allow` in both
+`code` and `agent`, so the tool loop needed no approval dialog to be correct.
+
+### The loop
+
+A turn is a conversation, not a single request. The model may answer, or it may
+call tools; if it calls, yonderllm runs them in order, appends each result, and
+asks again. The loop is bounded at **six rounds**. On the last round the tools
+are withheld, which turns the ceiling into a prose answer instead of a
+truncation — the model is asked to conclude with what it has rather than cut
+off mid-investigation.
+
+Each round is one request against the daily cap, and token usage accumulates
+across the whole turn so the footer reports the true cost of the answer, not
+just its final leg.
+
+Results are capped at 8 KiB and clipped on a line boundary, with a note saying
+how many lines were dropped. A tool result goes straight into the next prompt,
+so an unbounded one would spend your context window on a file the model only
+needed to glance at.
+
+### What you see
+
+Tool calls are not hidden. Each one lands in the transcript as its own block —
+the tool's name, the arguments it was called with, and the result once it
+returns, clipped for display:
+
+```
+tool search_files
+{"query": "parseFlags"}
+  3 matches for "parseFlags"
+  cmd/app/main.go:24: flags, err := parseFlags(os.Args[1:])
+  internal/app/flags.go:31: // parseFlags reads an argument list into a Flags.
+  internal/app/flags.go:36: func parseFlags(args []string) (Flags, error) {
+
+tool read_file
+{"path": "internal/app/flags.go"}
+  internal/app/flags.go
+  package app
+
+  import "flag"
+
+  ... 26 more lines
+```
+
+An answer that leans on a file you did not expect is visible as it happens,
+which is the difference between a tool loop you can trust and one you have to
+audit afterwards.
+
+> **Note.** Tool activity is surfaced in the TUI only. `run --json` currently
+> emits `notice`, `delta`, and `done` — the event schema below is complete as
+> written, and a tool event type will be added to it rather than smuggled into
+> an existing one.
+
+### Containment
+
+Every read and every search goes through `internal/workspace`, which holds an
+`os.Root` on the directory yonderllm was started in. Containment is a property
+of the handle, not a string check performed hopefully at the top of a function.
+
+| Refused | Because |
+| --- | --- |
+| Absolute paths | Addressable only inside the project |
+| Anything reaching `..` past the root | Escape, rejected before any syscall |
+| Windows device names such as `NUL`, `COM1` | Not files, however they resolve |
+| Binary files | Sniffed, not trusted by extension |
+| Files over 1 MiB | A prompt is not a place to put a megabyte |
+
+Searches stop at 200 matches and skip the directories nobody means to search —
+`.git`, `node_modules`, `vendor`, build output. Unreadable files are skipped
+rather than aborting the walk: one permission error in a tree should not cost
+you the other 900 results.
+
+---
+
 ## Scripting with `run --json`
 
 `run --json` emits newline-delimited JSON — one object per line, flushed as it
@@ -466,13 +582,18 @@ The policy is enforced in one place, `internal/perm`, so the rules can be read
 and tested as a unit rather than inferred from call sites. Escalation is always
 an explicit act: nothing promotes itself out of `chat`.
 
-> **Status.** Read and search are wired through the policy and enforced:
-> `internal/workspace` performs every read and search behind
-> `perm.Policy.Check`, and `/read` and `/search` surface a refusal rather than
-> a result in `chat` mode. Write and execute are not built yet, so the `ask`
-> cells in the table above describe the policy the remaining tools will be
-> wired into, not capabilities that exist today. No mode writes a file or runs
-> a command.
+Reading and searching are live in both directions. You reach them with `/read`
+and `/search`; the model reaches them as [tools](#tools). Both directions go
+through the same `perm.Policy`, so a mode that refuses you refuses the model
+too — and a capability the mode does not allow is never even described to the
+model.
+
+> **Status.** Write and execute are not built yet, so the `ask` cells in the
+> table above describe the policy the remaining tools will be wired into, not
+> capabilities that exist today. No mode writes a file or runs a command. That
+> also means `code` and `agent` currently offer the model the same two tools;
+> they diverge once write and execute arrive with the approval prompt they
+> require.
 
 ---
 
@@ -485,6 +606,7 @@ internal/config/    the config file, its paths, and its precedence rules
 internal/provider/  HTTP clients for OpenAI-compatible endpoints
 internal/session/   conversation state, streaming, fallback chain, usage cap
 internal/perm/      the permission policy
+internal/tools/     the capabilities the model is offered, gated by that policy
 internal/tui/       the Bubble Tea interface
 internal/workspace/ containment-checked file reads and searches
 ```
