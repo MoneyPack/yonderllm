@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -456,5 +457,279 @@ func TestRedactKeyishKeepsSurroundingText(t *testing.T) {
 	}
 	if !strings.Contains(got, "try again.") {
 		t.Errorf("redaction dropped trailing text: %q", got)
+	}
+}
+
+// readSchema is a small but realistic parameter schema. It is written compactly
+// so that a byte comparison after the round trip is meaningful: the adapter is
+// supposed to pass the schema through untouched, not re-encode it.
+const readSchema = `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`
+
+func TestStreamSendsToolDefinitions(t *testing.T) {
+	srv, seen := sseServer(t, []string{"data: [DONE]\n\n"})
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	_, _, err := collect(p.Stream(context.Background(), Request{
+		Model:    "tiny",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Tools: []Tool{
+			{Name: "read", Description: "Read a file", Parameters: json.RawMessage(readSchema)},
+			{Name: "search"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+
+	if len(seen.Tools) != 2 {
+		t.Fatalf("sent %d tools, want 2", len(seen.Tools))
+	}
+	read := seen.Tools[0]
+	if read.Type != "function" {
+		t.Errorf("tool type = %q, want function", read.Type)
+	}
+	if read.Function.Name != "read" || read.Function.Description != "Read a file" {
+		t.Errorf("tool = %+v, want the read tool with its description", read.Function)
+	}
+	if got := string(read.Function.Parameters); got != readSchema {
+		t.Errorf("schema = %s, want it passed through as %s", got, readSchema)
+	}
+	// A tool with no schema should not acquire an empty one on the way out.
+	if got := seen.Tools[1].Function.Parameters; got != nil {
+		t.Errorf("schemaless tool carried parameters %s, want none", got)
+	}
+}
+
+// TestStreamOmitsToolsKeyWhenEmpty inspects the raw body rather than the decoded
+// one, because the distinction that matters here — an absent key versus an empty
+// array — does not survive decoding.
+func TestStreamOmitsToolsKeyWhenEmpty(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	if _, _, err := collect(p.Stream(context.Background(), Request{
+		Model:    "tiny",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})); err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	if strings.Contains(string(body), "tools") {
+		t.Errorf("request mentions tools with none to send: %s", body)
+	}
+}
+
+func TestStreamReassemblesToolCallFragments(t *testing.T) {
+	srv, _ := sseServer(t, []string{
+		// Two calls, interleaved, with their arguments split across frames
+		// and the second one introduced before the first is finished.
+		frame(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\"path\":"}}]}}]}`),
+		frame(`{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"search","arguments":"{\"q\":\"todo\"}"}}]}}]}`),
+		frame(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"main.go\"}"}}]}}]}`),
+		frame(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`),
+		"data: [DONE]\n\n",
+	})
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	text, chunks, err := collect(p.Stream(context.Background(), Request{
+		Model:    "tiny",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	if text != "" {
+		t.Errorf("tool-only turn produced text %q, want none", text)
+	}
+	// Fragments are not chunks: nothing reaches the caller until the calls
+	// are whole.
+	if len(chunks) != 1 {
+		t.Fatalf("got %d chunks, want 1 carrying the finished calls", len(chunks))
+	}
+	got := chunks[0]
+	if got.Finish != FinishTool {
+		t.Errorf("finish reason = %q, want %q", got.Finish, FinishTool)
+	}
+	if len(got.ToolCalls) != 2 {
+		t.Fatalf("got %d calls, want 2", len(got.ToolCalls))
+	}
+	first := got.ToolCalls[0]
+	if first.ID != "call_a" || first.Name != "read" {
+		t.Errorf("first call = %+v, want call_a/read", first)
+	}
+	if want := `{"path":"main.go"}`; first.Arguments != want {
+		t.Errorf("first arguments = %q, want %q", first.Arguments, want)
+	}
+	// Ordering follows the server's numbering, not the arrival of the last
+	// fragment, which here would have put the calls the other way around.
+	if second := got.ToolCalls[1]; second.ID != "call_b" || second.Name != "search" {
+		t.Errorf("second call = %+v, want call_b/search", second)
+	}
+}
+
+// TestStreamReassemblesUnnumberedToolCalls covers servers that stream a single
+// call and leave the index out entirely.
+func TestStreamReassemblesUnnumberedToolCalls(t *testing.T) {
+	srv, _ := sseServer(t, []string{
+		frame(`{"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"name":"read","arguments":"{\"path\""}}]}}]}`),
+		frame(`{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":":\"go.mod\"}"}}]}}]}`),
+		frame(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`),
+		"data: [DONE]\n\n",
+	})
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	_, chunks, err := collect(p.Stream(context.Background(), Request{
+		Model:    "tiny",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	if len(chunks) != 1 || len(chunks[0].ToolCalls) != 1 {
+		t.Fatalf("got %+v, want a single reassembled call", chunks)
+	}
+	call := chunks[0].ToolCalls[0]
+	if want := `{"path":"go.mod"}`; call.ID != "call_a" || call.Arguments != want {
+		t.Errorf("call = %+v, want call_a with arguments %q", call, want)
+	}
+}
+
+// TestStreamFlushesToolCallsWithoutFinishReason covers the servers that go
+// straight from the last argument fragment to the end of the stream. The calls
+// are complete; only the announcement is missing.
+func TestStreamFlushesToolCallsWithoutFinishReason(t *testing.T) {
+	fragments := []string{
+		frame(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{}"}}]}}]}`),
+	}
+	cases := map[string][]string{
+		"done sentinel": append(slices.Clone(fragments), "data: [DONE]\n\n"),
+		"stream ends":   fragments,
+	}
+	for name, frames := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := sseServer(t, frames)
+			p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+			_, chunks, err := collect(p.Stream(context.Background(), Request{
+				Model:    "tiny",
+				Messages: []Message{{Role: RoleUser, Content: "hi"}},
+			}))
+			if err != nil {
+				t.Fatalf("stream failed: %v", err)
+			}
+			if len(chunks) != 1 {
+				t.Fatalf("got %d chunks, want the flushed call", len(chunks))
+			}
+			if chunks[0].Finish != FinishTool || len(chunks[0].ToolCalls) != 1 {
+				t.Errorf("flushed chunk = %+v, want one call finished as %q", chunks[0], FinishTool)
+			}
+		})
+	}
+}
+
+// TestStreamRestatesPlainStopAsTool covers a server that reports a tool turn as
+// an ordinary stop. The turn is not over for the caller: there are calls to run.
+func TestStreamRestatesPlainStopAsTool(t *testing.T) {
+	srv, _ := sseServer(t, []string{
+		frame(`{"choices":[{"delta":{"content":"Let me look."}}]}`),
+		frame(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{}"}}]},"finish_reason":"stop"}]}`),
+		"data: [DONE]\n\n",
+	})
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	text, chunks, err := collect(p.Stream(context.Background(), Request{
+		Model:    "tiny",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	if text != "Let me look." {
+		t.Errorf("text = %q, want the prose that preceded the call", text)
+	}
+	last := chunks[len(chunks)-1]
+	if last.Finish != FinishTool {
+		t.Errorf("finish reason = %q, want it restated as %q", last.Finish, FinishTool)
+	}
+	if len(last.ToolCalls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(last.ToolCalls))
+	}
+}
+
+// TestStreamReplaysToolMessages checks the other direction: an assistant turn
+// that asked for a tool, and the result answering it, have to go back to the
+// server in the shape it recognizes or the model loses the thread.
+func TestStreamReplaysToolMessages(t *testing.T) {
+	srv, seen := sseServer(t, []string{"data: [DONE]\n\n"})
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	_, _, err := collect(p.Stream(context.Background(), Request{
+		Model: "tiny",
+		Messages: []Message{
+			{Role: RoleUser, Content: "what is in go.mod?"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{
+				ID:        "call_a",
+				Name:      "read",
+				Arguments: `{"path":"go.mod"}`,
+			}}},
+			{Role: RoleTool, ToolCallID: "call_a", Content: "module yonderllm"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+
+	if len(seen.Messages) != 3 {
+		t.Fatalf("sent %d messages, want 3", len(seen.Messages))
+	}
+	assistant := seen.Messages[1]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 {
+		t.Fatalf("assistant turn = %+v, want one tool call", assistant)
+	}
+	call := assistant.ToolCalls[0]
+	if call.ID != "call_a" || call.Type != "function" {
+		t.Errorf("replayed call = %+v, want call_a typed as a function", call)
+	}
+	if call.Function.Name != "read" || call.Function.Arguments != `{"path":"go.mod"}` {
+		t.Errorf("replayed call function = %+v, want read with its arguments", call.Function)
+	}
+	result := seen.Messages[2]
+	if result.Role != "tool" || result.ToolCallID != "call_a" {
+		t.Errorf("result turn = %+v, want a tool message tied to call_a", result)
+	}
+	if result.Content != "module yonderllm" {
+		t.Errorf("result content = %q, want the tool's output", result.Content)
+	}
+	// An ordinary turn should not pick up tool plumbing on the way out.
+	if user := seen.Messages[0]; user.ToolCallID != "" || user.ToolCalls != nil {
+		t.Errorf("user turn = %+v, want it free of tool fields", user)
+	}
+}
+
+// TestFinishReasonVocabulary pins the whole wire vocabulary, including the
+// spellings only some servers use and the deliberate fallback for values we
+// have never seen.
+func TestFinishReasonVocabulary(t *testing.T) {
+	cases := []struct {
+		wire string
+		want FinishReason
+	}{
+		{"", FinishNone},
+		{"stop", FinishStop},
+		{"tool_calls", FinishTool},
+		{"function_call", FinishTool},
+		{"length", FinishLength},
+		{"max_tokens", FinishLength},
+		{"content_filter", FinishFilter},
+		{"something_new", FinishStop},
+	}
+	for _, c := range cases {
+		if got := finishReason(c.wire); got != c.want {
+			t.Errorf("finishReason(%q) = %v, want %v", c.wire, got, c.want)
+		}
 	}
 }

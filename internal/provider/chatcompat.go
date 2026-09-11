@@ -9,6 +9,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -71,6 +72,10 @@ type chatRequest struct {
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`
 	Stream      bool          `json:"stream"`
+	// Tools is omitted entirely when empty rather than sent as an empty
+	// array, because a server that sees the key at all may switch the model
+	// onto a tool-aware prompt template it does not need.
+	Tools []wireTool `json:"tools,omitempty"`
 	// StreamOptions asks for a final usage frame. Servers that do not know
 	// the field ignore it.
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
@@ -80,16 +85,62 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// wireTool is a tool in the envelope the format requires. The "function" nesting
+// is vestigial — the type has only ever had the one value — but servers still
+// validate it, so we send it.
+type wireTool struct {
+	Type     string       `json:"type"`
+	Function wireFunction `json:"function"`
+}
+
+type wireFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
 type wireMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// ToolCalls carries what the model asked for on an assistant turn we
+	// are replaying back to it, and ToolCallID ties a tool result to the
+	// call it answers. Both are absent on ordinary turns.
+	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type wireToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function wireCallFunction `json:"function"`
+}
+
+type wireCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// toolCallFragment is one piece of a streamed tool call. A server sends the
+// call's id and name in one frame and its arguments a few characters at a time
+// in the frames that follow, so no single fragment is usable on its own.
+type toolCallFragment struct {
+	// Index numbers the call within the message, so that fragments of two
+	// tools requested at once can be told apart. A server streaming a
+	// single call sometimes leaves it out, hence the pointer.
+	Index    *int   `json:"index"`
+	ID       string `json:"id"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 // chatChunk is one SSE frame of a streamed completion.
 type chatChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content   string             `json:"content"`
+			ToolCalls []toolCallFragment `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -97,6 +148,75 @@ type chatChunk struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 	} `json:"usage"`
+}
+
+// toolCallBuffer reassembles the fragments of a streamed tool call.
+//
+// It exists so that [Chunk.ToolCalls] can promise complete calls: a caller has
+// nothing to do with half an argument list, and every caller would otherwise
+// have to repeat this bookkeeping for itself.
+type toolCallBuffer struct {
+	order []int
+	calls map[int]*ToolCall
+}
+
+func newToolCallBuffer() *toolCallBuffer {
+	return &toolCallBuffer{calls: map[int]*ToolCall{}}
+}
+
+// add folds one fragment into the call it belongs to.
+func (b *toolCallBuffer) add(f toolCallFragment) {
+	i := b.slot(f)
+	call, ok := b.calls[i]
+	if !ok {
+		call = &ToolCall{}
+		b.calls[i] = call
+		b.order = append(b.order, i)
+	}
+	// Identity arrives once and the rest of the fragments repeat nothing,
+	// so an empty field is silence rather than a correction.
+	if f.ID != "" {
+		call.ID = f.ID
+	}
+	if f.Function.Name != "" {
+		call.Name = f.Function.Name
+	}
+	call.Arguments += f.Function.Arguments
+}
+
+// slot picks the call a fragment belongs to. An unnumbered fragment starts a
+// new call if it introduces an id and otherwise continues the one in progress,
+// which is how a server that streams a single call and omits the numbering
+// still reassembles correctly.
+func (b *toolCallBuffer) slot(f toolCallFragment) int {
+	switch {
+	case f.Index != nil:
+		return *f.Index
+	case f.ID != "" || len(b.order) == 0:
+		return len(b.order)
+	default:
+		return b.order[len(b.order)-1]
+	}
+}
+
+// take returns the reassembled calls and empties the buffer.
+//
+// They come back ordered by the server's own numbering rather than by the order
+// the fragments arrived, so that a provider which interleaves two calls still
+// hands the caller the sequence the model wrote.
+func (b *toolCallBuffer) take() []ToolCall {
+	if len(b.order) == 0 {
+		return nil
+	}
+	slots := slices.Clone(b.order)
+	slices.Sort(slots)
+	out := make([]ToolCall, 0, len(slots))
+	for _, i := range slots {
+		out = append(out, *b.calls[i])
+	}
+	b.order = nil
+	b.calls = map[int]*ToolCall{}
+	return out
 }
 
 // Stream sends req and yields chunks as the server produces them.
@@ -110,11 +230,33 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 			Stream:        true,
 			StreamOptions: &streamOptions{IncludeUsage: true},
 		}
-		for _, m := range req.Messages {
-			body.Messages = append(body.Messages, wireMessage{
-				Role:    string(m.Role),
-				Content: m.Content,
+		for _, t := range req.Tools {
+			body.Tools = append(body.Tools, wireTool{
+				Type: "function",
+				Function: wireFunction{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  t.Parameters,
+				},
 			})
+		}
+		for _, m := range req.Messages {
+			wm := wireMessage{
+				Role:       string(m.Role),
+				Content:    m.Content,
+				ToolCallID: m.ToolCallID,
+			}
+			for _, c := range m.ToolCalls {
+				wm.ToolCalls = append(wm.ToolCalls, wireToolCall{
+					ID:   c.ID,
+					Type: "function",
+					Function: wireCallFunction{
+						Name:      c.Name,
+						Arguments: c.Arguments,
+					},
+				})
+			}
+			body.Messages = append(body.Messages, wm)
 		}
 
 		encoded, err := json.Marshal(body)
@@ -149,6 +291,20 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		// limit is not generous enough to rely on.
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
+		calls := newToolCallBuffer()
+		// flush emits whatever calls have been reassembled but not yet
+		// handed over. It runs when the stream ends without a finish
+		// reason, which happens on servers that go straight from the last
+		// argument fragment to [DONE]; without it those calls would be
+		// collected and then dropped.
+		flush := func() bool {
+			pending := calls.take()
+			if len(pending) == 0 {
+				return true
+			}
+			return yield(Chunk{ToolCalls: pending, Finish: FinishTool}, nil)
+		}
+
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			// Blank separators and comment/keep-alive lines carry no data.
@@ -161,6 +317,7 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 			}
 			data = strings.TrimSpace(data)
 			if data == "[DONE]" {
+				flush()
 				return
 			}
 
@@ -172,8 +329,23 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 
 			var chunk Chunk
 			if len(frame.Choices) > 0 {
-				chunk.Delta = frame.Choices[0].Delta.Content
-				chunk.Finish = finishReason(frame.Choices[0].FinishReason)
+				choice := frame.Choices[0]
+				chunk.Delta = choice.Delta.Content
+				chunk.Finish = finishReason(choice.FinishReason)
+				for _, f := range choice.Delta.ToolCalls {
+					calls.add(f)
+				}
+				// A finish reason closes the model's turn, so anything
+				// collected by now is whole and goes out with it. The
+				// reason is restated as FinishTool even when the server
+				// called it a plain stop, because the turn is not over
+				// for the caller: there are calls left to run.
+				if chunk.Finish != FinishNone {
+					if pending := calls.take(); len(pending) > 0 {
+						chunk.ToolCalls = pending
+						chunk.Finish = FinishTool
+					}
+				}
 			}
 			if frame.Usage != nil {
 				chunk.Usage = &Usage{
@@ -193,7 +365,9 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 
 		if err := scanner.Err(); err != nil {
 			yield(Chunk{}, fmt.Errorf("%s: reading stream: %w", p.name, err))
+			return
 		}
+		flush()
 	}
 }
 
@@ -203,8 +377,10 @@ func finishReason(s string) FinishReason {
 	switch s {
 	case "":
 		return FinishNone
-	case "stop", "tool_calls", "function_call":
+	case "stop":
 		return FinishStop
+	case "tool_calls", "function_call":
+		return FinishTool
 	case "length", "max_tokens":
 		return FinishLength
 	case "content_filter":
