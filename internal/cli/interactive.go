@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"yonderllm/internal/perm"
-	"yonderllm/internal/session"
 	"yonderllm/internal/tui"
 )
 
@@ -37,7 +36,7 @@ func (e *env) runTUI() error {
 	}
 
 	return tui.Run(tui.Options{
-		Session: session.New(cfg, newResolver(cfg)),
+		Session: newSessionFor(cfg, mode),
 		Mode:    mode,
 		In:      e.in,
 		Out:     e.out,

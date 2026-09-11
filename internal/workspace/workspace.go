@@ -114,7 +114,7 @@ func (w *Workspace) ReadFile(name string) ([]byte, error) {
 
 	info, err := w.root.Stat(rel)
 	if err != nil {
-		return nil, fmt.Errorf("workspace: read %s: %w", name, err)
+		return nil, readError(name, err)
 	}
 	if info.IsDir() {
 		return nil, fmt.Errorf("workspace: read %s: is a directory", name)
@@ -125,7 +125,7 @@ func (w *Workspace) ReadFile(name string) ([]byte, error) {
 
 	data, err := w.root.ReadFile(rel)
 	if err != nil {
-		return nil, fmt.Errorf("workspace: read %s: %w", name, err)
+		return nil, readError(name, err)
 	}
 	if isBinary(data) {
 		return nil, fmt.Errorf("workspace: read %s: not a text file", name)
@@ -199,9 +199,11 @@ func (w *Workspace) authorize(a perm.Action) error {
 }
 
 // relative converts a caller's name into one the root will accept. Absolute
-// names are rejected here rather than deeper down, because the root's own
-// refusal reads as a filesystem error when the real problem is that the name
-// was never inside the workspace.
+// names and names that climb out of the workspace are rejected here rather
+// than deeper down, because the root's own refusal reads as a filesystem
+// error when the real problem is that the name was never inside the
+// workspace. Escapes in particular arrive from the root carrying no sentinel
+// at all, so catching them lexically is the only way to say why they failed.
 func relative(name string) (string, error) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -210,7 +212,42 @@ func relative(name string) (string, error) {
 	if filepath.IsAbs(trimmed) || strings.HasPrefix(trimmed, "/") {
 		return "", fmt.Errorf("workspace: %s is outside the workspace", name)
 	}
-	return filepath.FromSlash(trimmed), nil
+	// Cleaning first means "sub/../../x" is judged by where it lands, not by
+	// where its segments start.
+	rel := filepath.FromSlash(trimmed)
+	cleaned := filepath.Clean(rel)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("workspace: %s is outside the workspace", name)
+	}
+	return rel, nil
+}
+
+// errNoFile is the workspace's own way of saying a name matched nothing. It
+// exists instead of a wrapped os.ErrNotExist because wrapping would append the
+// standard library's "file does not exist" to a sentence that has already made
+// the point, and the name is in the prefix every read error carries. Reporting
+// itself as os.ErrNotExist keeps that appearance free of cost: a caller asking
+// errors.Is whether the file was absent still gets a true answer.
+var errNoFile = noFileError{}
+
+type noFileError struct{}
+
+func (noFileError) Error() string { return "no file named that" }
+
+func (noFileError) Is(target error) bool { return target == os.ErrNotExist }
+
+// readError turns the root's refusal into the vocabulary relative uses. The
+// missing-file case is reworded so a reader is told what is wrong rather than
+// handed a syscall's phrasing. An escape cannot be recognised here at all,
+// because os.Root reports one with an unexported error carrying no sentinel
+// and matching its message would couple us to a string the standard library is
+// free to reword; relative rejects those before any syscall, and this handles
+// what is left.
+func readError(name string, err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("workspace: read %s: %w", name, errNoFile)
+	}
+	return fmt.Errorf("workspace: read %s: %w", name, err)
 }
 
 // appendMatches collects the matching lines of one file.

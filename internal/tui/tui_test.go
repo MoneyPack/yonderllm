@@ -574,6 +574,9 @@ func TestReadCommandReportsAMissingFile(t *testing.T) {
 	}
 }
 
+// A path climbing out of the workspace is refused by name, before any read is
+// attempted, so the transcript says the path is outside the workspace rather
+// than reporting a failed read.
 func TestReadCommandRejectsAPathOutsideTheWorkspace(t *testing.T) {
 	workspaceDir(t, map[string]string{"notes.txt": "alpha\n"})
 
@@ -585,7 +588,7 @@ func TestReadCommandRejectsAPathOutsideTheWorkspace(t *testing.T) {
 	if last.kind != blockError {
 		t.Errorf("escaping /read block kind = %v, want blockError", last.kind)
 	}
-	if !strings.Contains(last.text, "workspace: read ../escape.txt") {
+	if !strings.Contains(last.text, "../escape.txt is outside the workspace") {
 		t.Errorf("escaping /read text = %q", last.text)
 	}
 }

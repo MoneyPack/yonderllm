@@ -5,8 +5,10 @@ import (
 	"sync"
 
 	"yonderllm/internal/config"
+	"yonderllm/internal/perm"
 	"yonderllm/internal/provider"
 	"yonderllm/internal/session"
+	"yonderllm/internal/tools"
 )
 
 // This file is the composition root's narrowest part: the one function that
@@ -81,5 +83,27 @@ func (e *env) newSession() (*session.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return session.New(cfg, newResolver(cfg)), nil
+
+	// resolve has already rejected an unparseable mode, so this cannot fail;
+	// the error is still returned rather than discarded because a future
+	// change to resolve should not silently start defaulting to chat.
+	mode, err := perm.ParseMode(cfg.Mode)
+	if err != nil {
+		return nil, err
+	}
+	return newSessionFor(cfg, mode), nil
+}
+
+// newSessionFor builds a conversation from an already-resolved configuration
+// and equips it with the tools mode permits.
+//
+// It exists so that the interactive interface, which needs the permission mode
+// for its own display and therefore cannot go through newSession, still gets a
+// session assembled identically. Attaching the tools here rather than at each
+// call site means a mode can never reach a model with the wrong hands: there is
+// one statement in the program that decides what a session may touch.
+func newSessionFor(cfg config.Config, mode perm.Mode) *session.Session {
+	sess := session.New(cfg, newResolver(cfg))
+	sess.SetTools(tools.For(perm.New(mode))...)
+	return sess
 }
