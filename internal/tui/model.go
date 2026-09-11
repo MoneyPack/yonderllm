@@ -153,6 +153,61 @@ func (m *model) refresh() {
 	m.view.GotoBottom()
 }
 
+// commitPending moves the reply in flight into the transcript.
+//
+// It is called both when an exchange ends and when a tool call interrupts one,
+// because in either case the text already on screen has stopped growing and
+// belongs above whatever comes next. Refreshing is left to the caller, which is
+// about to change the transcript again anyway.
+func (m *model) commitPending() {
+	if text := strings.TrimSpace(m.pending); text != "" {
+		m.blocks = append(m.blocks, block{kind: blockAssistant, tag: m.answered, text: text})
+	}
+	m.pending = ""
+}
+
+// tool records a tool call, or rewrites the record of one already shown.
+//
+// A call reaches the transcript twice: once when the model sends it, so that a
+// slow search is visibly in progress rather than a hang, and once with what it
+// returned. The second arrival replaces the first, matched on the call's id, so
+// the transcript ends up with one entry per call.
+func (m *model) tool(run *session.ToolRun) {
+	// Anything the model said before reaching for a tool belongs above the
+	// call. Leaving it in pending would put it below, because refresh draws
+	// the reply in flight after every committed block.
+	m.commitPending()
+
+	b := toolBlock(run)
+	for i, existing := range m.blocks {
+		if existing.kind == blockTool && existing.id != "" && existing.id == run.ID {
+			m.blocks[i] = b
+			m.refresh()
+			return
+		}
+	}
+	m.append(b)
+}
+
+// toolBlock builds the transcript entry for one tool call.
+func toolBlock(run *session.ToolRun) block {
+	result := run.Result
+	if run.Err != "" {
+		// A tool that fails is not a failed exchange: the error goes back
+		// to the model, which usually tries something else. So it stays a
+		// tool block, keeping its place in the sequence and its id for the
+		// match above, rather than being promoted to an error block and
+		// shouted about.
+		result = "error: " + run.Err
+	}
+	return block{
+		kind: blockTool,
+		tag:  run.Name,
+		id:   run.ID,
+		text: toolView(run.Arguments, result),
+	}
+}
+
 // submit starts an exchange for prompt.
 func (m *model) submit(prompt string) tea.Cmd {
 	m.seq++
@@ -169,10 +224,7 @@ func (m *model) submit(prompt string) tea.Cmd {
 // finish ends the exchange in flight, committing whatever text arrived.
 func (m *model) finish() {
 	m.busy = false
-	if text := strings.TrimSpace(m.pending); text != "" {
-		m.blocks = append(m.blocks, block{kind: blockAssistant, tag: m.answered, text: text})
-	}
-	m.pending = ""
+	m.commitPending()
 	m.refresh()
 }
 

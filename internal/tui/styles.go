@@ -10,6 +10,7 @@ const (
 	brandFG  = lipgloss.Color("212")
 	brandInk = lipgloss.Color("232")
 	userFG   = lipgloss.Color("117")
+	toolFG   = lipgloss.Color("114")
 	noticeFG = lipgloss.Color("221")
 	errorFG  = lipgloss.Color("203")
 	mutedFG  = lipgloss.Color("245")
@@ -27,6 +28,7 @@ type styles struct {
 	rule     lipgloss.Style
 	userTag  lipgloss.Style
 	botTag   lipgloss.Style
+	toolTag  lipgloss.Style
 	notice   lipgloss.Style
 	errorTag lipgloss.Style
 	body     lipgloss.Style
@@ -47,6 +49,7 @@ func newStyles() styles {
 		rule:     lipgloss.NewStyle().Foreground(ruleFG),
 		userTag:  lipgloss.NewStyle().Bold(true).Foreground(userFG),
 		botTag:   lipgloss.NewStyle().Bold(true).Foreground(brandFG),
+		toolTag:  lipgloss.NewStyle().Bold(true).Foreground(toolFG),
 		notice:   lipgloss.NewStyle().Foreground(noticeFG),
 		errorTag: lipgloss.NewStyle().Bold(true).Foreground(errorFG),
 		body:     lipgloss.NewStyle(),

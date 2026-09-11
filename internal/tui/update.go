@@ -114,6 +114,14 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		// close message remains the single point that clears it.
 		m.append(block{kind: blockError, text: packet.err.Error()})
 
+	case packet.event.Tool != nil:
+		// The provider is recorded first: committing the text written
+		// before the call tags it with whoever wrote it.
+		if packet.event.Provider != "" {
+			m.answered = packet.event.Provider
+		}
+		m.tool(packet.event.Tool)
+
 	case packet.event.Notice != "":
 		m.append(block{kind: blockNotice, text: packet.event.Notice})
 		if packet.event.Provider != "" {

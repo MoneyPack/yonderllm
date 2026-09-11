@@ -891,6 +891,8 @@ func TestBlockRender(t *testing.T) {
 		{"notice", block{kind: blockNotice, text: "heads up"}, []string{"·", "heads up"}},
 		{"error", block{kind: blockError, text: "it broke"}, []string{"error", "it broke"}},
 		{"info", block{kind: blockInfo, text: "reference"}, []string{"reference"}},
+		{"tool named", block{kind: blockTool, tag: "read_file", text: "main.go"}, []string{"tool read_file", "main.go"}},
+		{"tool unnamed", block{kind: blockTool, text: "something"}, []string{"tool tool", "something"}},
 	}
 
 	for _, tc := range cases {
@@ -979,5 +981,233 @@ func TestEndToEndExchange(t *testing.T) {
 	}
 	if got := m.sess.Usage().Requests(); got != 1 {
 		t.Errorf("usage recorded %d requests, want 1", got)
+	}
+}
+
+// toolBlocks returns the tool entries in the transcript, so that a test can
+// assert a call was rewritten rather than reported twice.
+func toolBlocks(m model) []block {
+	var found []block
+	for _, b := range m.blocks {
+		if b.kind == blockTool {
+			found = append(found, b)
+		}
+	}
+	return found
+}
+
+// streaming puts a model into the middle of an exchange, which is the only
+// state in which stream messages are accepted.
+func streaming(m model, provider string) model {
+	m.seq = 1
+	m.busy = true
+	m.answered = provider
+	m.current = stream{seq: 1, ch: make(chan streamPacket, 1), cancel: func() {}}
+	return m
+}
+
+func TestToolResultReplacesTheStartedCall(t *testing.T) {
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m = streaming(m, "stub")
+
+	// A tool call is announced before it runs so that a slow search does
+	// not look like a stalled session.
+	start := &session.ToolRun{ID: "call-1", Name: "read_file", Arguments: `{"path": "main.go"}`}
+	m, cmd := step(t, m, streamEventMsg{seq: 1, packet: streamPacket{event: session.Event{Provider: "stub", Tool: start}}})
+	if cmd == nil {
+		t.Fatal("a tool event did not ask for the next packet")
+	}
+
+	shown := toolBlocks(m)
+	if len(shown) != 1 {
+		t.Fatalf("tool blocks after the start = %d, want 1", len(shown))
+	}
+	if shown[0].tag != "read_file" {
+		t.Errorf("tool block tag = %q, want %q", shown[0].tag, "read_file")
+	}
+	if shown[0].id != "call-1" {
+		t.Errorf("tool block id = %q, want %q", shown[0].id, "call-1")
+	}
+	if !strings.Contains(shown[0].text, "main.go") {
+		t.Errorf("tool block does not show its arguments:\n%s", shown[0].text)
+	}
+	if !strings.Contains(shown[0].text, "(no output)") {
+		t.Errorf("a call with no result yet should say so:\n%s", shown[0].text)
+	}
+
+	// The result arrives as a second event carrying the same id, and takes
+	// the place of the announcement instead of following it.
+	done := &session.ToolRun{ID: "call-1", Name: "read_file", Arguments: `{"path": "main.go"}`, Finished: true, Result: "package main"}
+	m, _ = step(t, m, streamEventMsg{seq: 1, packet: streamPacket{event: session.Event{Provider: "stub", Tool: done}}})
+
+	shown = toolBlocks(m)
+	if len(shown) != 1 {
+		t.Fatalf("tool blocks after the result = %d, want 1", len(shown))
+	}
+	if !strings.Contains(shown[0].text, "package main") {
+		t.Errorf("tool block does not show its result:\n%s", shown[0].text)
+	}
+	if strings.Contains(shown[0].text, "(no output)") {
+		t.Errorf("the finished call still reads as unanswered:\n%s", shown[0].text)
+	}
+}
+
+func TestToolErrorIsShownInTheToolBlock(t *testing.T) {
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m = streaming(m, "stub")
+
+	// A tool that fails is still a tool that ran: the failure belongs with
+	// the call, not in an error block of its own, because the model is
+	// about to be told the same thing and may recover from it.
+	failed := &session.ToolRun{ID: "call-1", Name: "read_file", Arguments: `{"path": "nope.go"}`, Finished: true, Err: "workspace: read nope.go: no file named that"}
+	m, _ = step(t, m, streamEventMsg{seq: 1, packet: streamPacket{event: session.Event{Provider: "stub", Tool: failed}}})
+
+	shown := toolBlocks(m)
+	if len(shown) != 1 {
+		t.Fatalf("tool blocks = %d, want 1", len(shown))
+	}
+	if !strings.Contains(shown[0].text, "error: ") {
+		t.Errorf("a failed call is not labelled as one:\n%s", shown[0].text)
+	}
+	if !strings.Contains(shown[0].text, "no file named that") {
+		t.Errorf("the failure text was dropped:\n%s", shown[0].text)
+	}
+}
+
+func TestTextBeforeAToolIsCommittedFirst(t *testing.T) {
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m = streaming(m, "stub")
+
+	// A model often says what it is about to do before doing it. That text
+	// has to land above the call rather than be held back and end up below
+	// it once the exchange finishes.
+	m, _ = step(t, m, streamEventMsg{seq: 1, packet: streamPacket{event: session.Event{Delta: "let me look", Provider: "stub"}}})
+	run := &session.ToolRun{ID: "call-1", Name: "read_file", Arguments: `{"path": "main.go"}`}
+	m, _ = step(t, m, streamEventMsg{seq: 1, packet: streamPacket{event: session.Event{Provider: "stub", Tool: run}}})
+
+	if m.pending != "" {
+		t.Errorf("pending = %q, want it committed before the call", m.pending)
+	}
+	if n := len(m.blocks); n < 2 {
+		t.Fatalf("blocks = %d, want the text and the call", n)
+	}
+	said := m.blocks[len(m.blocks)-2]
+	if said.kind != blockAssistant || said.text != "let me look" {
+		t.Errorf("block above the call = %+v, want the assistant text", said)
+	}
+	if said.tag != "stub" {
+		t.Errorf("committed text tag = %q, want %q", said.tag, "stub")
+	}
+	if last := m.blocks[len(m.blocks)-1]; last.kind != blockTool {
+		t.Errorf("last block kind = %v, want blockTool", last.kind)
+	}
+}
+
+func TestStaleToolEventsAreDropped(t *testing.T) {
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m.seq = 2
+	m.busy = true
+	m.current = stream{seq: 2, ch: make(chan streamPacket, 1), cancel: func() {}}
+
+	// A tool call from an exchange the person already cancelled must not
+	// appear under the one that replaced it.
+	run := &session.ToolRun{ID: "call-1", Name: "read_file", Finished: true, Result: "package main"}
+	m, cmd := step(t, m, streamEventMsg{seq: 1, packet: streamPacket{event: session.Event{Provider: "stub", Tool: run}}})
+	if cmd != nil {
+		t.Error("a stale tool event re-issued the read command")
+	}
+	if n := len(toolBlocks(m)); n != 0 {
+		t.Errorf("tool blocks = %d, want none from a stale stream", n)
+	}
+}
+
+func TestToolViewPairsArgumentsWithTheResult(t *testing.T) {
+	cases := []struct {
+		name      string
+		arguments string
+		result    string
+		want      string
+	}{
+		{
+			name:      "result indented under the call",
+			arguments: "{}",
+			result:    "one\ntwo",
+			want:      "{}\n  one\n  two",
+		},
+		{
+			name:      "blank lines are left blank",
+			arguments: "{}",
+			result:    "one\n\ntwo",
+			want:      "{}\n  one\n\n  two",
+		},
+		{
+			name:      "nothing back is said out loud",
+			arguments: "{}",
+			result:    "",
+			want:      "{}\n  (no output)",
+		},
+		{
+			name:      "a trailing newline is not output",
+			arguments: "{}",
+			result:    "\n\n",
+			want:      "{}\n  (no output)",
+		},
+		{
+			name:      "no arguments at all",
+			arguments: "",
+			result:    "done",
+			want:      "(no arguments)\n  done",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toolView(tc.arguments, tc.result); got != tc.want {
+				t.Errorf("toolView = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToolArgsCollapsesWhitespaceAndTruncates(t *testing.T) {
+	// However the model laid the JSON out, the transcript wants one line.
+	if got, want := toolArgs("{\n  \"path\": \"main.go\"\n}"), `{ "path": "main.go" }`; got != want {
+		t.Errorf("toolArgs = %q, want %q", got, want)
+	}
+
+	long := toolArgs(`{"query": "` + strings.Repeat("x", maxToolArgBytes*2) + `"}`)
+	if len(long) != maxToolArgBytes+3 {
+		t.Errorf("truncated arguments are %d bytes, want %d", len(long), maxToolArgBytes+3)
+	}
+	if !strings.HasSuffix(long, "...") {
+		t.Errorf("truncated arguments do not say so: %q", long)
+	}
+}
+
+func TestClipLinesReportsWhatItDropped(t *testing.T) {
+	if got := clipLines("\n\n", maxToolLines); got != "" {
+		t.Errorf("clipLines of blank text = %q, want empty", got)
+	}
+	if got, want := clipLines("one\ntwo\n", maxToolLines), "one\ntwo"; got != want {
+		t.Errorf("clipLines = %q, want %q", got, want)
+	}
+
+	var lines []string
+	for i := range maxToolLines + 10 {
+		lines = append(lines, fmt.Sprintf("line %d", i+1))
+	}
+	out := clipLines(strings.Join(lines, "\n"), maxToolLines)
+
+	if !strings.Contains(out, "line 1\n") {
+		t.Errorf("the start of the result was dropped:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("line %d", maxToolLines)) {
+		t.Errorf("the last kept line is missing:\n%s", out)
+	}
+	if strings.Contains(out, fmt.Sprintf("line %d", maxToolLines+1)) {
+		t.Errorf("a line past the limit survived:\n%s", out)
+	}
+	if !strings.Contains(out, "... 10 more lines") {
+		t.Errorf("the dropped count is missing:\n%s", out)
 	}
 }
