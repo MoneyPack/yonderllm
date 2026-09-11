@@ -8,6 +8,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
 )
 
@@ -18,12 +19,50 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	// RoleTool marks the result of a tool the model asked us to run. It is
+	// a distinct role rather than a user turn because the model must be
+	// able to tell what it requested from what a human typed.
+	RoleTool Role = "tool"
 )
 
 // Message is one turn in a conversation.
 type Message struct {
 	Role    Role
 	Content string
+	// ToolCalls is set on an assistant turn in which the model asked for
+	// one or more tools to be run. Content is usually empty on such a turn.
+	ToolCalls []ToolCall
+	// ToolCallID ties a [RoleTool] message back to the [ToolCall.ID] it
+	// answers. Providers match results to requests by this id, not by
+	// position, because a model may request several tools at once.
+	ToolCallID string
+}
+
+// Tool is a capability offered to the model.
+//
+// Parameters is raw JSON Schema rather than a Go type because every provider
+// that accepts tools accepts JSON Schema, and modelling the schema language in
+// Go would buy nothing but a translation layer that could only lose detail.
+type Tool struct {
+	// Name is the identifier the model uses to call the tool.
+	Name string
+	// Description tells the model when the tool is the right choice. It is
+	// the only guidance the model gets, so it carries real weight.
+	Description string
+	// Parameters is a JSON Schema object describing the arguments.
+	Parameters json.RawMessage
+}
+
+// ToolCall is one request from the model to run a tool.
+type ToolCall struct {
+	// ID is the provider's handle for this call, echoed back on the result.
+	ID string
+	// Name is the [Tool.Name] being called.
+	Name string
+	// Arguments is the JSON object the model produced for the call. It is
+	// kept as text because the model, not a schema, decided its shape, and
+	// it may not parse; the tool decides what to do about that.
+	Arguments string
 }
 
 // Model describes a model offered by a provider.
@@ -138,6 +177,11 @@ type Request struct {
 	// Temperature is applied only when non-nil, so that a provider's own
 	// default is preserved when the user has not chosen one.
 	Temperature *float64
+	// Tools are the capabilities the model may call on this request. An
+	// empty slice means the model must answer from the conversation alone,
+	// which is what chat mode wants; the permission policy, not the
+	// adapter, decides how much of the toolbox reaches this field.
+	Tools []Tool
 }
 
 // FinishReason explains why a stream ended.
@@ -152,6 +196,10 @@ const (
 	FinishLength FinishReason = "length"
 	// FinishFilter means the provider's content filter intervened.
 	FinishFilter FinishReason = "filter"
+	// FinishTool means the model stopped to wait on a tool result. It is a
+	// pause rather than an ending: the caller runs the requested calls,
+	// appends the results, and streams again.
+	FinishTool FinishReason = "tool"
 )
 
 // Usage reports token accounting. Fields are 0 when a provider omits them.
@@ -167,9 +215,29 @@ type Chunk struct {
 	Delta string
 	// Finish is set on the final chunk of a response.
 	Finish FinishReason
+	// ToolCalls carries the calls the model asked for, complete rather
+	// than in fragments. Providers stream a tool call in pieces spread
+	// over many chunks; reassembling those pieces is a provider-specific
+	// quirk and so stays inside the adapter, which means a chunk that
+	// carries tool calls at all carries them whole. It accompanies
+	// [FinishTool].
+	ToolCalls []ToolCall
 	// Usage is populated when the provider reports totals, typically on the
 	// final chunk only.
 	Usage *Usage
+}
+
+// empty reports whether a chunk carries nothing a caller could act on.
+//
+// It is a method rather than a comparison against the zero value because a
+// chunk holds a slice of tool calls, and Go will not compare a struct that
+// does. Adapters use it to drop the priming and keep-alive frames providers
+// send, which would otherwise make callers redraw for no reason.
+func (c Chunk) empty() bool {
+	return c.Delta == "" &&
+		c.Finish == FinishNone &&
+		len(c.ToolCalls) == 0 &&
+		c.Usage == nil
 }
 
 // Provider is a remote inference backend.

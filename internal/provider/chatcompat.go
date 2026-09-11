@@ -183,7 +183,7 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 			}
 			// Frames that carry nothing at all (an empty role-priming delta,
 			// for instance) would only make the caller redraw for no reason.
-			if chunk == (Chunk{}) {
+			if chunk.empty() {
 				continue
 			}
 			if !yield(chunk, nil) {
