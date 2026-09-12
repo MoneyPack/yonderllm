@@ -110,6 +110,31 @@ Rules that hold in every mode:
 - Destructive shell commands require an explicit confirmation regardless of the
   configured approval level.
 
+### Approval
+
+A mode that answers **Ask** does not decide anything by itself; it defers to the
+person at the terminal. Asking needs an interface, so the policy does not carry
+the question — the caller that owns an interface supplies an *approver*, and the
+tool layer calls it the moment a model requests a gated action.
+
+The prompt states the action, its target, and enough of the change to judge it:
+a diff for a write, the exact argument vector for an exec. Rules:
+
+- **Deny is the default.** An empty answer, an interrupt, a closed input, or a
+  cancelled context all mean no.
+- **A denial is not an error.** It goes back to the model as a tool result
+  saying the user refused, so it can propose something else instead of retrying
+  blindly.
+- **Approval is per call, never remembered.** Approving one write does not
+  approve the next. Only `agent` mode with auto-approval configured skips the
+  prompt, and destructive commands are confirmed even then.
+
+Where no approver exists — `--json` output, a pipe, any non-interactive run —
+a capability the mode would ask about is withheld from the model entirely
+rather than silently allowed or offered and then refused. Scripts that want
+writes must ask for them explicitly with `--yes`, which is accepted only in
+`agent` mode.
+
 ## 7. Cost control
 
 - Models are banded by price: **free** (both rates zero), **cheap** (both rates
