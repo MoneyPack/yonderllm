@@ -31,6 +31,7 @@ import (
 	"yonderllm/internal/perm"
 	"yonderllm/internal/provider"
 	"yonderllm/internal/session"
+	"yonderllm/internal/shell"
 	"yonderllm/internal/workspace"
 )
 
@@ -93,6 +94,9 @@ func For(policy perm.Policy, approver Approver) []session.Tool {
 	}
 	if permitted(perm.Write) {
 		out = append(out, writeTool(policy, approver))
+	}
+	if permitted(perm.Exec) {
+		out = append(out, execTool(policy, approver))
 	}
 	return out
 }
@@ -251,7 +255,7 @@ func writeTool(policy perm.Policy, approver Approver) session.Tool {
 				Action: perm.Write,
 				Target: args.Path,
 				Detail: change(ws, args.Path, args.Content),
-			})
+			}, false)
 			if err != nil {
 				return "", err
 			}
@@ -269,16 +273,102 @@ func writeTool(policy perm.Policy, approver Approver) session.Tool {
 	}
 }
 
+// execTool describes and implements running one command.
+//
+// The command arrives as an argument vector rather than a line of shell,
+// because a string would have to be split by someone and every splitter is a
+// place where quoting turns one command into another. A vector the model wrote
+// is the vector that runs, which is also the only form honest enough to show a
+// person being asked to approve it.
+func execTool(policy perm.Policy, approver Approver) session.Tool {
+	return session.Tool{
+		Definition: provider.Tool{
+			Name: "run_command",
+			Description: "Run a program in the current project and return its output. The " +
+				"command is an argument vector, not a shell line: there is no " +
+				"shell, so pipes, redirection, globs and variable expansion do " +
+				"not work, and each argument is passed through exactly as " +
+				"given. The program must be on PATH or inside the project. " +
+				"Output is captured together, the command is stopped after 30 " +
+				"seconds, and a failing command reports its exit status rather " +
+				"than an error. The user may refuse the command.",
+			Parameters: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "command": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1,
+      "description": "The program followed by its arguments, e.g. [\"go\", \"test\", \"./internal/perm\"]"
+    }
+  },
+  "required": ["command"],
+  "additionalProperties": false
+}`),
+		},
+		Run: func(ctx context.Context, arguments string) (string, error) {
+			var args struct {
+				Command []string `json:"command"`
+			}
+			if err := decode(arguments, &args); err != nil {
+				return "", err
+			}
+			if len(args.Command) == 0 || strings.TrimSpace(args.Command[0]) == "" {
+				return "", errNeeds("command")
+			}
+
+			// Checked before prompting, not just before running: asking a
+			// reader who has already walked away is worse than doing nothing.
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+
+			runner, err := shell.Current(policy)
+			if err != nil {
+				return "", err
+			}
+
+			ok, err := consent(ctx, policy, approver, Request{
+				Action: perm.Exec,
+				Target: args.Command[0],
+				Detail: commandView(args.Command),
+			}, shell.Destructive(args.Command))
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				return fmt.Sprintf("the user refused to run %s; nothing was run. "+
+					"Ask what they would prefer instead of trying again.",
+					args.Command[0]), nil
+			}
+
+			result, err := runner.Run(ctx, args.Command)
+			if err != nil {
+				return "", err
+			}
+			return ranView(args.Command, result), nil
+		},
+	}
+}
+
 // consent decides whether a gated action may proceed.
 //
 // An allowed action needs no question: agent mode with auto-approval is
 // exactly the case where the policy has already answered, and prompting anyway
-// would make the setting a lie. An asked action without an approver cannot
+// would make the setting a lie. The one exception is a destructive action,
+// which [perm.Policy.Confirm] insists on asking about however the mode is
+// configured, because auto-approval is a statement about tedium and not a
+// waiver of anything irreversible. An asked action without an approver cannot
 // happen — [For] withholds the tool — so reaching it means the wiring is
 // wrong, and a bug that silently writes a file is worse than one that reports
 // itself.
-func consent(ctx context.Context, policy perm.Policy, approver Approver, req Request) (bool, error) {
-	switch policy.Check(req.Action) {
+func consent(ctx context.Context, policy perm.Policy, approver Approver, req Request, destructive bool) (bool, error) {
+	decision := policy.Check(req.Action)
+	if decision == perm.Allow && policy.Confirm(req.Action, destructive) {
+		decision = perm.Ask
+	}
+
+	switch decision {
 	case perm.Allow:
 		return true, nil
 	case perm.Ask:
@@ -316,6 +406,66 @@ func change(ws *workspace.Workspace, name, content string) string {
 // wroteView confirms a completed write.
 func wroteView(name, content string) string {
 	return fmt.Sprintf("wrote %s (%s)", name, plural(lines(content), "line"))
+}
+
+// commandView renders an argument vector the way a person reads a command.
+//
+// Arguments are joined with spaces because that is the form everyone already
+// knows, but an argument holding a space, a quote or nothing at all is shown
+// quoted so the boundary between arguments stays visible. Someone approving
+// rm "my file" has to be able to tell it from rm my file, which would delete
+// two different things, and a prompt that blurs the two would be worse than
+// no prompt at all.
+func commandView(args []string) string {
+	parts := make([]string, len(args))
+	for i, arg := range args {
+		if arg == "" || strings.ContainsAny(arg, " \t\n\"'") {
+			parts[i] = fmt.Sprintf("%q", arg)
+			continue
+		}
+		parts[i] = arg
+	}
+	return strings.Join(parts, " ")
+}
+
+// ranView renders a finished command for the model.
+//
+// The command is repeated above its output for the same reason a file's path
+// is: a result reaches the model detached from the call that asked for it. The
+// exit status is stated even when it is zero, because a command that printed
+// nothing while succeeding is otherwise indistinguishable from one that failed
+// to say why it failed, and a model left to infer success from the shape of
+// the output will sometimes infer wrong. Truncation is reported in the units it
+// happened in — bytes the shell never captured, lines this result could not
+// carry — since a model told only that something is missing cannot tell
+// whether narrowing the command would help.
+func ranView(args []string, result shell.Result) string {
+	var b strings.Builder
+	b.WriteString(commandView(args) + "\n")
+
+	switch {
+	case result.TimedOut:
+		b.WriteString("timed out and was stopped before it finished")
+	default:
+		fmt.Fprintf(&b, "exit status %d", result.Code)
+	}
+
+	if output := strings.TrimRight(result.Output, "\n"); output == "" {
+		b.WriteString("\n(no output)")
+	} else {
+		body, omitted := clip(output)
+		b.WriteString("\n\n" + body)
+		if omitted > 0 {
+			fmt.Fprintf(&b, "\n\n(%d more lines were not included: the output "+
+				"is longer than one tool result may carry)", omitted)
+		}
+	}
+
+	if result.Dropped > 0 {
+		fmt.Fprintf(&b, "\n\n(%s of further output were not captured: the "+
+			"command printed more than is kept)", plural(result.Dropped, "byte"))
+	}
+	return b.String()
 }
 
 // lines counts the lines content occupies once written.

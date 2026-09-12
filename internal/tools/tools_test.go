@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -150,21 +151,38 @@ func TestForGivesReadAndSearchWhereAllowed(t *testing.T) {
 // An approver is what turns a gated capability into an offered one. The same
 // policy yields a different tool set depending on whether there is anybody to
 // ask, which is the specification's rule stated as code: a run with nobody at
-// the other end does not get the write.
-func TestForOffersWritingOnlyWithAnApprover(t *testing.T) {
+// the other end does not get the write. Code and agent differ in what they gate
+// rather than in how the gate works, so each mode's full set is spelled out.
+func TestForOffersGatedToolsOnlyWithAnApprover(t *testing.T) {
+	wanted := map[perm.Mode][]string{
+		perm.Code:  {"read_file", "search_files", "write_file"},
+		perm.Agent: {"read_file", "search_files", "write_file", "run_command"},
+	}
 	for _, mode := range []perm.Mode{perm.Code, perm.Agent} {
 		policy := perm.New(mode)
 
 		withoutApprover := names(For(policy, nil))
-		if slices.Contains(withoutApprover, "write_file") {
-			t.Errorf("For(%s, no approver) = %v, want no write_file", mode, withoutApprover)
+		for _, gated := range []string{"write_file", "run_command"} {
+			if slices.Contains(withoutApprover, gated) {
+				t.Errorf("For(%s, no approver) = %v, want no %s", mode, withoutApprover, gated)
+			}
 		}
 
-		want := []string{"read_file", "search_files", "write_file"}
+		want := wanted[mode]
 		got := names(For(policy, allow().ask))
 		if !slices.Equal(got, want) {
 			t.Errorf("For(%s, approver) = %v, want %v", mode, got, want)
 		}
+	}
+}
+
+// Code proposes patches but never starts a process, which is the whole
+// distinction between it and agent. A mode that could run a command while
+// claiming not to would make the choice between the two meaningless.
+func TestForWithholdsRunningFromCodeMode(t *testing.T) {
+	got := names(For(perm.New(perm.Code), allow().ask))
+	if slices.Contains(got, "run_command") {
+		t.Errorf("For(code, approver) = %v, want no run_command", got)
 	}
 }
 
@@ -176,6 +194,9 @@ func TestForOffersWritingUnderAutoApprovalWithoutAnApprover(t *testing.T) {
 	got := names(For(perm.NewAutoApprove(perm.Agent), nil))
 	if !slices.Contains(got, "write_file") {
 		t.Errorf("For(auto-approved agent, no approver) = %v, want write_file", got)
+	}
+	if !slices.Contains(got, "run_command") {
+		t.Errorf("For(auto-approved agent, no approver) = %v, want run_command", got)
 	}
 }
 
@@ -556,5 +577,189 @@ func TestWriteFileRefusesAnEscapingPath(t *testing.T) {
 
 	if !strings.Contains(got, "outside the workspace") {
 		t.Errorf("write_file error = %q, want it to mention the workspace boundary", got)
+	}
+}
+
+// The point of the exec slice: an approved command runs in the project and its
+// output comes back, with the exit status stated even on success so a command
+// that printed nothing is not mistaken for one that failed silently.
+func TestRunCommandReturnsOutputOnceApproved(t *testing.T) {
+	workspaceDir(t, nil)
+
+	user := allow()
+	tool := find(t, For(perm.New(perm.Agent), user.ask), "run_command")
+	got := run(t, tool, `{"command": ["go", "env", "GOOS"]}`)
+
+	if !strings.Contains(got, runtime.GOOS) {
+		t.Errorf("run_command = %q, want it to carry the output %q", got, runtime.GOOS)
+	}
+	if !strings.Contains(got, "exit status 0") {
+		t.Errorf("run_command = %q, want it to state the exit status", got)
+	}
+	if !strings.Contains(got, "go env GOOS") {
+		t.Errorf("run_command = %q, want it to repeat the command", got)
+	}
+	user.only(t)
+}
+
+// A command that fails has still run, so its exit status is a result and not an
+// error: the model asked what happens and the answer is that it exited two.
+// Reporting it as a failure of the call would tell the model its own tooling is
+// broken when the truth is that the tests it ran did not pass.
+func TestRunCommandReportsAFailureAsAResult(t *testing.T) {
+	workspaceDir(t, nil)
+
+	tool := find(t, For(perm.New(perm.Agent), allow().ask), "run_command")
+	got := run(t, tool, `{"command": ["go", "help", "bogus-topic"]}`)
+
+	if !strings.Contains(got, "exit status 2") {
+		t.Errorf("run_command = %q, want the exit status of the failure", got)
+	}
+	if !strings.Contains(got, "unknown help topic") {
+		t.Errorf("run_command = %q, want what the command printed", got)
+	}
+}
+
+// A refusal is an answer here too. Nothing is started, and the result says so
+// plainly rather than looking like a command that ran and produced nothing.
+func TestRunCommandRunsNothingWhenRefused(t *testing.T) {
+	workspaceDir(t, nil)
+
+	user := refuse()
+	tool := find(t, For(perm.New(perm.Agent), user.ask), "run_command")
+
+	got, err := tool.Run(context.Background(), `{"command": ["go", "env", "GOOS"]}`)
+	if err != nil {
+		t.Fatalf("a refused command failed with %v, want the refusal as a result", err)
+	}
+	if !strings.Contains(got, "refused") {
+		t.Errorf("run_command = %q, want it to say the user refused", got)
+	}
+	if !strings.Contains(got, "go") {
+		t.Errorf("run_command = %q, want it to name the program", got)
+	}
+	if strings.Contains(got, "exit status") {
+		t.Errorf("run_command = %q, want no sign that anything ran", got)
+	}
+	user.only(t)
+}
+
+// The vector the model wrote is the vector the reader judges, argument for
+// argument. An argument holding a space is shown quoted, because approving
+// go run "my file.go" is a different decision from approving two separate
+// arguments, and a prompt that blurred them would be worse than none.
+func TestRunCommandAsksWithTheExactArgumentVector(t *testing.T) {
+	workspaceDir(t, nil)
+
+	user := refuse()
+	tool := find(t, For(perm.New(perm.Agent), user.ask), "run_command")
+	run(t, tool, `{"command": ["go", "run", "my file.go"]}`)
+
+	req := user.only(t)
+	if req.Action != perm.Exec {
+		t.Errorf("request action = %s, want %s", req.Action, perm.Exec)
+	}
+	if req.Target != "go" {
+		t.Errorf("request target = %q, want %q", req.Target, "go")
+	}
+	if want := `go run "my file.go"`; req.Detail != want {
+		t.Errorf("request detail = %q, want %q", req.Detail, want)
+	}
+}
+
+// Auto-approval spares the reader the tedious commands, so a harmless one runs
+// unasked; prompting anyway would make the setting a lie to whoever opted in.
+func TestRunCommandDoesNotAskAboutAHarmlessCommandUnderAutoApproval(t *testing.T) {
+	workspaceDir(t, nil)
+
+	user := refuse()
+	tool := find(t, For(perm.NewAutoApprove(perm.Agent), user.ask), "run_command")
+	got := run(t, tool, `{"command": ["go", "env", "GOOS"]}`)
+
+	if !strings.Contains(got, runtime.GOOS) {
+		t.Errorf("run_command = %q, want the command to have run", got)
+	}
+	if len(user.requests) != 0 {
+		t.Errorf("the user was asked %d times under auto-approval, want not at all", len(user.requests))
+	}
+}
+
+// Auto-approval is a statement about tedium, not a waiver of anything
+// irreversible: a destructive command is put to the reader however the mode is
+// configured, and their refusal stops it.
+func TestRunCommandStillAsksAboutADestructiveCommandUnderAutoApproval(t *testing.T) {
+	workspaceDir(t, nil)
+
+	user := refuse()
+	tool := find(t, For(perm.NewAutoApprove(perm.Agent), user.ask), "run_command")
+	got := run(t, tool, `{"command": ["git", "push", "--force"]}`)
+
+	req := user.only(t)
+	if req.Target != "git" {
+		t.Errorf("request target = %q, want %q", req.Target, "git")
+	}
+	if !strings.Contains(got, "refused") {
+		t.Errorf("run_command = %q, want the refusal to have stopped it", got)
+	}
+}
+
+// The generic argument tests run in code mode, which has no exec at all, so the
+// same mistakes are put to run_command separately. Each message tells the model
+// what to send next: an object, a repaired object, or the argument it left out.
+func TestRunCommandExplainsBadArguments(t *testing.T) {
+	workspaceDir(t, nil)
+
+	tool := find(t, For(perm.New(perm.Agent), allow().ask), "run_command")
+
+	for _, arguments := range []string{"", "   "} {
+		want := "no arguments were given; send a JSON object"
+		if got := wantErr(t, tool, arguments); got != want {
+			t.Errorf("run_command(%q) error = %q, want %q", arguments, got, want)
+		}
+	}
+
+	if got := wantErr(t, tool, `{"command": [`); !strings.Contains(got, "arguments are not valid JSON") {
+		t.Errorf("run_command error = %q, want it to blame the JSON", got)
+	}
+
+	want := fmt.Sprintf("the %q argument is required and must not be empty", "command")
+	for _, arguments := range []string{`{}`, `{"command": []}`, `{"command": [""]}`, `{"command": ["   "]}`} {
+		if got := wantErr(t, tool, arguments); got != want {
+			t.Errorf("run_command(%s) error = %q, want %q", arguments, got, want)
+		}
+	}
+}
+
+// A cancelled round starts no process and asks no question, for the same reason
+// the file tools touch no disk: the reader who would answer has gone.
+func TestRunCommandStartsNothingWhenCancelled(t *testing.T) {
+	workspaceDir(t, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	user := allow()
+	tool := find(t, For(perm.New(perm.Agent), user.ask), "run_command")
+
+	if _, err := tool.Run(ctx, `{"command": ["go", "env", "GOOS"]}`); err != context.Canceled {
+		t.Errorf("run_command error = %v, want %v", err, context.Canceled)
+	}
+	if len(user.requests) != 0 {
+		t.Errorf("the user was asked %d times after cancellation, want not at all", len(user.requests))
+	}
+}
+
+// Approval is not a way out of the project. A program named by an absolute path
+// is refused however the reader answered, and the refusal reaches the model so
+// it learns the edge is there.
+func TestRunCommandRefusesAProgramOutsideTheWorkspace(t *testing.T) {
+	workspaceDir(t, nil)
+
+	tool := find(t, For(perm.New(perm.Agent), allow().ask), "run_command")
+
+	for _, arguments := range []string{`{"command": ["/bin/sh"]}`, `{"command": ["C:\\Windows\\System32\\cmd.exe"]}`, `{"command": ["../tool"]}`} {
+		if got := wantErr(t, tool, arguments); !strings.Contains(got, "outside the workspace") {
+			t.Errorf("run_command(%s) error = %q, want it to mention the workspace boundary", arguments, got)
+		}
 	}
 }
