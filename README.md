@@ -152,7 +152,8 @@ yonderllm -p gemini ask "summarise the CAP theorem"
 ### `run`
 
 The scriptable one-shot. Identical output to `ask` by default; with `--json`
-it emits one JSON object per line instead.
+it emits one JSON object per line instead — including the model's tool calls,
+which plain output leaves out.
 
 ```sh
 yonderllm run "hello"
@@ -494,10 +495,10 @@ An answer that leans on a file you did not expect is visible as it happens,
 which is the difference between a tool loop you can trust and one you have to
 audit afterwards.
 
-> **Note.** Tool activity is surfaced in the TUI only. `run --json` currently
-> emits `notice`, `delta`, and `done` — the event schema below is complete as
-> written, and a tool event type will be added to it rather than smuggled into
-> an existing one.
+Scripts see the same thing. `run --json` reports each call as a `tool` event
+and each outcome as a `tool_result`, described in the [event
+schema](#event-schema) below. Plain `run` prints only the answer, so a tool
+loop never disturbs output something else is already parsing.
 
 ### Containment
 
@@ -541,17 +542,57 @@ yonderllm run --json "count to three"
 
 | Field | Type | Present on | Meaning |
 | --- | --- | --- | --- |
-| `type` | string | all | `delta`, `notice`, `done`, or `error` |
+| `type` | string | all | `delta`, `notice`, `tool`, `tool_result`, `done`, or `error` |
 | `delta` | string | `delta` | The next fragment of the reply |
 | `notice` | string | `notice` | Something worth knowing, such as a fallback |
-| `provider` | string | `notice`, `done` | Provider that served the request |
-| `model` | string | `notice`, `done` | Model that served the request |
+| `provider` | string | all | Provider that served the request |
+| `model` | string | all | Model that served the request |
+| `tool` | object | `tool`, `tool_result` | The call, and then how it ended |
 | `error` | string | `error` | What went wrong |
 | `usage` | object | `done` | `prompt_tokens`, `completion_tokens`, `total_tokens` |
 
 A stream ends with exactly one `done` or one `error`. Notices are informational
 and never terminal, which means a consumer can ignore every type it does not
 recognise and still be correct.
+
+Every event carries `provider` and `model`, so a line is meaningful on its own
+even when a fallback changed which provider was answering partway through. The
+examples here elide both for readability.
+
+### Tool events
+
+A call and its outcome are two events, not one, because the call is worth
+showing before the work has finished. They share an `id`, so a consumer can pair
+them without depending on adjacency:
+
+```json
+{"type":"tool","tool":{"id":"call_1","name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}
+{"type":"tool_result","tool":{"id":"call_1","name":"read_file","arguments":"{\"path\":\"go.mod\"}","result":"go.mod\nmodule yonderllm\n"}}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | Ties a `tool_result` to its `tool` |
+| `name` | string | `read_file` or `search_files` |
+| `arguments` | string | The JSON the model sent, verbatim |
+| `result` | string | What the tool returned, on success |
+| `error` | string | Why the tool refused, instead of `result` |
+
+`arguments` is a string and not an object on purpose: it is the model's own
+JSON, passed through unaltered. yonderllm will not reformat a malformed call
+into something that looks valid, so what you see is what the model actually
+asked for.
+
+A `tool_result` carries exactly one of `result` or `error`. A refused call is
+not a failed turn — the message goes back to the model, which usually corrects
+itself and answers, and the stream still ends in `done`.
+
+Watch what the model reads:
+
+```sh
+yonderllm run --mode code --json "$PROMPT" \
+  | jq -r 'select(.type=="tool") | "\(.tool.name) \(.tool.arguments)"'
+```
 
 Reassemble a reply:
 

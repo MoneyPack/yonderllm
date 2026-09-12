@@ -290,6 +290,150 @@ func TestRunHelpDescribesTheJSONContract(t *testing.T) {
 	)
 }
 
+func TestRunJSONReportsAToolCallBeforeItsResult(t *testing.T) {
+	h := newHarness(t, newStubWithRounds(t, [][]string{
+		toolCallRound("call_1", "read_file", `{"path":"run.go"}`),
+		proseRound("done"),
+	}))
+
+	r := h.run(t, "run", "--json", "--mode", "code", "read run.go")
+
+	wantCode(t, r, 0)
+	calls := toolEvents(t, r.stdout)
+	if len(calls) != 2 {
+		t.Fatalf("want a call and a result, got %d tool events\n--- stdout ---\n%s",
+			len(calls), r.stdout)
+	}
+	if calls[0].Type != "tool" || calls[1].Type != "tool_result" {
+		t.Errorf("want tool then tool_result, got %q then %q", calls[0].Type, calls[1].Type)
+	}
+	if calls[0].Tool.ID != calls[1].Tool.ID {
+		t.Errorf("the call and its result carry different ids: %q and %q",
+			calls[0].Tool.ID, calls[1].Tool.ID)
+	}
+	if calls[0].Tool.ID != "call_1" {
+		t.Errorf("tool id = %q, want %q", calls[0].Tool.ID, "call_1")
+	}
+	if calls[0].Tool.Name != "read_file" {
+		t.Errorf("tool name = %q, want %q", calls[0].Tool.Name, "read_file")
+	}
+	if calls[0].Tool.Arguments != `{"path":"run.go"}` {
+		t.Errorf("tool arguments = %q, want the model's raw JSON", calls[0].Tool.Arguments)
+	}
+}
+
+// The arguments the model produced are never validated, so they travel as a
+// string. Inlining them would let one malformed object break the line it rides
+// on and take the rest of the stream with it.
+func TestRunJSONCarriesToolArgumentsAsAString(t *testing.T) {
+	h := newHarness(t, newStubWithRounds(t, [][]string{
+		toolCallRound("call_1", "read_file", `{"path":"run.go"}`),
+		proseRound("done"),
+	}))
+
+	r := h.run(t, "run", "--json", "--mode", "code", "read run.go")
+
+	wantCode(t, r, 0)
+	wantContains(t, "stdout", r.stdout, `"arguments":"{\"path\":\"run.go\"}"`)
+}
+
+func TestRunJSONReportsWhatAToolFound(t *testing.T) {
+	h := newHarness(t, newStubWithRounds(t, [][]string{
+		toolCallRound("call_1", "read_file", `{"path":"run.go"}`),
+		proseRound("done"),
+	}))
+
+	r := h.run(t, "run", "--json", "--mode", "code", "read run.go")
+
+	wantCode(t, r, 0)
+	result := lastEventOfType(t, r.stdout, "tool_result")
+	if result.Tool.Error != "" {
+		t.Fatalf("reading a file that exists failed: %s", result.Tool.Error)
+	}
+	if !strings.Contains(result.Tool.Result, "run.go") {
+		t.Errorf("the result does not name the file it read:\n%s", result.Tool.Result)
+	}
+}
+
+// A tool that fails is reported, not hidden: the model is told and so is the
+// consumer of the stream.
+func TestRunJSONReportsAToolThatFailed(t *testing.T) {
+	h := newHarness(t, newStubWithRounds(t, [][]string{
+		toolCallRound("call_1", "read_file", `{}`),
+		proseRound("sorry"),
+	}))
+
+	r := h.run(t, "run", "--json", "--mode", "code", "read nothing")
+
+	wantCode(t, r, 0)
+	result := lastEventOfType(t, r.stdout, "tool_result")
+	if result.Tool.Error == "" {
+		t.Fatalf("a call with no path was reported as a success:\n--- stdout ---\n%s", r.stdout)
+	}
+	if !strings.Contains(result.Tool.Error, "path") {
+		t.Errorf("the error does not say which argument was missing: %q", result.Tool.Error)
+	}
+	if result.Tool.Result != "" {
+		t.Errorf("a failed call carries a result as well: %q", result.Tool.Result)
+	}
+}
+
+// A tool call is a step towards the answer, not part of it, so the plain form
+// says nothing about it and the answer arrives exactly as it would have without
+// the detour.
+func TestRunKeepsPlainOutputFreeOfToolNoise(t *testing.T) {
+	h := newHarness(t, newStubWithRounds(t, [][]string{
+		toolCallRound("call_1", "read_file", `{"path":"run.go"}`),
+		proseRound("done"),
+	}))
+
+	r := h.run(t, "run", "--mode", "code", "read run.go")
+
+	wantCode(t, r, 0)
+	if r.stdout != "done\n" {
+		t.Errorf("stdout = %q, want just the answer", r.stdout)
+	}
+	wantNotContains(t, "stdout", r.stdout, "read_file", "call_1")
+}
+
+// A tool round reports no usage of its own, so the totals on the done event
+// still describe the exchange rather than only its last leg.
+func TestRunJSONStillReportsUsageAfterATool(t *testing.T) {
+	h := newHarness(t, newStubWithRounds(t, [][]string{
+		toolCallRound("call_1", "read_file", `{"path":"run.go"}`),
+		proseRound("done"),
+	}))
+
+	r := h.run(t, "run", "--json", "--mode", "code", "read run.go")
+
+	wantCode(t, r, 0)
+	done := lastEventOfType(t, r.stdout, "done")
+	if done.Usage == nil {
+		t.Fatalf("the done event reports no usage\n--- stdout ---\n%s", r.stdout)
+	}
+	if done.Usage.TotalTokens != 18 {
+		t.Errorf("total tokens = %d, want %d", done.Usage.TotalTokens, 18)
+	}
+}
+
+// toolEvents returns the tool and tool_result events in the order they arrived,
+// which is the order a consumer would have to make sense of them in.
+func toolEvents(t *testing.T, stdout string) []wireEvent {
+	t.Helper()
+
+	var out []wireEvent
+	for _, ev := range decodeNDJSON[wireEvent](t, stdout) {
+		if ev.Type != "tool" && ev.Type != "tool_result" {
+			continue
+		}
+		if ev.Tool == nil {
+			t.Fatalf("a %q event carries no tool\n--- stdout ---\n%s", ev.Type, stdout)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
 // joinDeltas concatenates the delta events, which is the answer text as a
 // consumer of the JSON stream would reassemble it.
 func joinDeltas(t *testing.T, stdout string) string {

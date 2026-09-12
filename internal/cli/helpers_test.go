@@ -40,9 +40,16 @@ type stubRequest struct {
 // stub is a fake provider backend. It answers /chat/completions with a
 // server-sent event stream and /models with a catalogue, and records the last
 // chat request it saw so tests can assert on what the session sent.
+//
+// Frames are grouped into rounds because a tool exchange is more than one
+// request: the model asks for a tool in its first answer and writes prose in
+// its second. Each request consumes the next round, and the last round answers
+// everything after it, so a stub built from a single round behaves exactly as
+// it did before rounds were a concept.
 type stub struct {
 	server *httptest.Server
-	frames []string
+	rounds [][]string
+	round  int
 	models []stubModel
 	last   stubRequest
 	seen   bool
@@ -96,12 +103,21 @@ func newStub(t *testing.T, deltas ...string) *stub {
 }
 
 // newStubWithFrames starts a backend that replays exactly the frames given,
-// for tests that need malformed or unusual streams.
+// for tests that need malformed or unusual streams. One frame list is one
+// round, which every request after the first replays again.
 func newStubWithFrames(t *testing.T, frames []string) *stub {
+	t.Helper()
+	return newStubWithRounds(t, [][]string{frames})
+}
+
+// newStubWithRounds starts a backend that answers each successive request with
+// the next round of frames, for tests that drive the tool loop through more
+// than one exchange.
+func newStubWithRounds(t *testing.T, rounds [][]string) *stub {
 	t.Helper()
 
 	s := &stub{
-		frames: frames,
+		rounds: rounds,
 		models: []stubModel{
 			{ID: "llama-3.1-8b-instant", ContextWindow: 131072, Pricing: cheapPricing()},
 			{ID: "llama-3.3-70b-versatile", ContextWindow: 32768, Pricing: paidPricing()},
@@ -142,13 +158,24 @@ func (s *stub) handleChat(t *testing.T) http.HandlerFunc {
 		if !ok {
 			t.Fatal("response writer does not support flushing")
 		}
-		for _, f := range s.frames {
+		for _, f := range s.nextRound() {
 			if _, err := io.WriteString(w, f); err != nil {
 				return
 			}
 			flusher.Flush()
 		}
 	}
+}
+
+// nextRound returns the frames that answer this request and moves the cursor
+// on. The last round is never used up, so a stub built from a single round
+// answers every request the same way.
+func (s *stub) nextRound() []string {
+	frames := s.rounds[s.round]
+	if s.round < len(s.rounds)-1 {
+		s.round++
+	}
+	return frames
 }
 
 func (s *stub) handleModels(t *testing.T) http.HandlerFunc {
@@ -179,10 +206,60 @@ func contentFrame(text string) string {
 	return frame(string(payload))
 }
 
+// toolCallFrame asks for one tool by name. Real backends dribble the arguments
+// out across several fragments, but the adapter reassembles them before the
+// session ever sees them, so one complete fragment exercises the same path.
+func toolCallFrame(id, name, arguments string) string {
+	payload, err := json.Marshal(map[string]any{
+		"choices": []any{
+			map[string]any{"delta": map[string]any{
+				"tool_calls": []any{
+					map[string]any{
+						"index": 0,
+						"id":    id,
+						"function": map[string]any{
+							"name":      name,
+							"arguments": arguments,
+						},
+					},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return frame(string(payload))
+}
+
+// toolCallRound is a whole round in which the model does nothing but ask for a
+// tool, which is what the first round of a tool exchange looks like.
+func toolCallRound(id, name, arguments string) []string {
+	return []string{
+		rolePrimingFrame(),
+		toolCallFrame(id, name, arguments),
+		toolDoneFrame(),
+	}
+}
+
+// proseRound is a whole round in which the model answers in words, which is
+// what the round after a tool result looks like.
+func proseRound(text string) []string {
+	return []string{rolePrimingFrame(), contentFrame(text), doneFrame()}
+}
+
 // doneFrame closes the stream with a finish reason, usage, and the sentinel.
 func doneFrame() string {
 	stop := frame(`{"choices":[{"delta":{},"finish_reason":"stop"}],` +
 		`"usage":{"prompt_tokens":11,"completion_tokens":7}}`)
+	return stop + frame("[DONE]")
+}
+
+// toolDoneFrame closes a round that ended in a tool call rather than prose. It
+// reports no usage, so a stub whose last round carries the usual usage numbers
+// still totals to exactly those numbers however many tool rounds precede it.
+func toolDoneFrame() string {
+	stop := frame(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
 	return stop + frame("[DONE]")
 }
 

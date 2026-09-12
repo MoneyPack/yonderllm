@@ -24,9 +24,10 @@ func newRunCmd(e *env) *cobra.Command {
 		Short: "Send one prompt, optionally as a machine-readable stream",
 		Long: "Send a single prompt and emit the result for a program to consume.\n\n" +
 			"With --json, every event is written to standard output as one JSON\n" +
-			"object per line: text deltas as they stream, provider notices, and a\n" +
-			"final object carrying token usage. Failures are emitted as an event\n" +
-			"too, so a consumer reading line by line never has to parse stderr.\n\n" +
+			"object per line: text deltas as they stream, provider notices, the\n" +
+			"tool calls the model makes and what they returned, and a final\n" +
+			"object carrying token usage. Failures are emitted as an event too,\n" +
+			"so a consumer reading line by line never has to parse stderr.\n\n" +
 			"With no prompt argument the prompt is read from standard input.\n" +
 			"With no prompt argument and nothing piped in, the interactive\n" +
 			"session opens instead.",
@@ -80,8 +81,38 @@ type wireEvent struct {
 	Notice   string     `json:"notice,omitempty"`
 	Provider string     `json:"provider,omitempty"`
 	Model    string     `json:"model,omitempty"`
+	Tool     *wireTool  `json:"tool,omitempty"`
 	Error    string     `json:"error,omitempty"`
 	Usage    *wireUsage `json:"usage,omitempty"`
+}
+
+// wireTool describes one tool invocation.
+//
+// A call and its outcome are two events rather than one field that fills in
+// later, so a consumer can report that a tool is running before it finishes.
+// The id is what ties them together.
+//
+// Arguments is a string holding the JSON the model produced, not inlined JSON,
+// because the model's output is never validated: a malformed object would
+// otherwise corrupt the line it travels on and take the whole stream with it.
+type wireTool struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+	Result    string `json:"result,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// newWireTool converts a run, using its Finished flag to pick the event type so
+// that the caller cannot label a start as a result or the other way round.
+func newWireTool(run *session.ToolRun) (string, *wireTool) {
+	t := &wireTool{ID: run.ID, Name: run.Name, Arguments: run.Arguments}
+	if !run.Finished {
+		return "tool", t
+	}
+	t.Result = run.Result
+	t.Error = run.Err
+	return "tool_result", t
 }
 
 // wireUsage mirrors [provider.Usage] with the total precomputed, because the
@@ -128,6 +159,9 @@ func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, 
 			return err
 		}
 		switch {
+		case ev.Tool != nil:
+			typ, t := newWireTool(ev.Tool)
+			emit(wireEvent{Type: typ, Provider: ev.Provider, Tool: t})
 		case ev.Notice != "":
 			emit(wireEvent{Type: "notice", Notice: ev.Notice, Provider: ev.Provider})
 		case ev.Delta != "":
