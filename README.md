@@ -1,5 +1,7 @@
 # yonderllm
 
+[![CI](https://github.com/MoneyPackk/yonderllm/actions/workflows/ci.yml/badge.svg)](https://github.com/MoneyPackk/yonderllm/actions/workflows/ci.yml)
+
 A terminal client for large language models that never runs one.
 
 Inference happens *yonder* — on a provider's hardware, over the network. Your
@@ -674,6 +676,25 @@ On Windows, if Go is installed but not on `PATH`:
 & "C:\Program Files\Go\bin\go.exe" vet ./...
 & "C:\Program Files\Go\bin\go.exe" test ./...
 ```
+
+### Continuous integration
+
+Every push and pull request against `main` runs
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). The toolchain version
+comes from `go.mod`, so the workflow cannot drift from what the module declares.
+
+Two jobs:
+
+- **test** — gofmt, `go vet`, `go build`, and `go test` on `ubuntu-latest`,
+  `windows-latest`, and `macos-latest`, the three platforms the project ships
+  binaries for. The matrix does not fail fast, so one red platform still
+  reports the others. It earns its cost: reserved device names are refused on
+  Windows only, and the configuration search path differs on every OS.
+- **race and coverage** — `go test -race` plus a coverage total, on Ubuntu
+  alone. The race detector requires cgo, and yonderllm is deliberately pure
+  Go, so a C compiler is not something every runner can be assumed to have.
+  One platform is enough: the goroutines under test are the session's tool
+  loop and event stream, which are identical everywhere.
 
 ### Cross-compiling
 

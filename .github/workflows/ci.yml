@@ -1,0 +1,84 @@
+# Continuous integration for yonderllm.
+#
+# The build matrix spans the three platforms the project ships binaries for,
+# because yonderllm has real per-platform behaviour: reserved device names are
+# refused on Windows only, and configuration paths differ on every OS. A green
+# run on Linux alone would say nothing about those paths.
+#
+# The race detector needs cgo, and yonderllm is deliberately pure Go, so no
+# runner is guaranteed to have a C compiler. Race runs on Ubuntu, where one is,
+# and the other platforms run the ordinary test binary.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel a superseded run on the same branch rather than paying for it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the results from the others.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # go.mod is the single source of truth for the toolchain version, so the
+      # workflow never drifts from what the module declares.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Formatting
+        # gofmt exits 0 whether or not it found anything, so the file list is
+        # the signal. Printed before failing, so the log names the offenders.
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...
+
+  race:
+    name: race and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The race detector is the reason this job exists: the session runs tool
+      # calls and streams events across goroutines, and a data race there would
+      # be invisible to an ordinary test run.
+      - name: Test with race detector
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -n 1
