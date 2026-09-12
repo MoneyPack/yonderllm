@@ -12,6 +12,12 @@
 // not allow is never described to the model at all: refusing a call the model
 // was invited to make wastes a round trip and teaches it nothing, whereas a
 // tool it was never told about cannot be attempted.
+//
+// Capabilities the mode gates behind an approval are the same shape of
+// question one step further on. The policy says an approval is needed but
+// cannot collect one, so [For] takes an [Approver] from the caller that owns
+// an interface and calls it at the moment the model asks. Without an approver
+// the capability is withheld exactly as an unpermitted one is.
 package tools
 
 import (
@@ -19,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 
 	"yonderllm/internal/perm"
@@ -37,20 +44,55 @@ import (
 // discarding everything else.
 const maxResultBytes = 8 << 10
 
+// Request describes an action awaiting the user's word.
+//
+// It carries what a person needs to judge the action and nothing else:
+// which capability is being used, what it would touch, and enough of the
+// change itself to say yes or no honestly. Detail is a diff for a write and
+// the exact argument vector for an exec, because an approval given against a
+// summary is not really an approval.
+type Request struct {
+	Action perm.Action
+	Target string
+	Detail string
+}
+
+// Approver puts a [Request] to the user and reports whether they allowed it.
+//
+// The answer is a bare bool: refusal is not a failure, so there is no error
+// to return. Everything that is not a clear yes — an empty answer, an
+// interrupt, closed input, a cancelled context — is a no, which makes denial
+// the outcome of every path an implementation forgets to handle.
+type Approver func(ctx context.Context, req Request) bool
+
 // For returns the tools policy permits, in a stable order.
 //
-// Only capabilities the policy outright allows are included. A decision of
-// [perm.Ask] is treated as a refusal here because nothing in this package can
-// put a question to the user; modes that would ask are handled by the caller
-// that owns an interface, and until one does, withholding is the honest
-// answer.
-func For(policy perm.Policy) []session.Tool {
+// A capability the policy denies is never described to the model. One the
+// policy gates behind [perm.Ask] is offered only when approver is non-nil,
+// because a tool that cannot ask cannot honour the gate; withholding it is
+// what the specification means by a capability being absent from a
+// non-interactive run.
+func For(policy perm.Policy, approver Approver) []session.Tool {
+	permitted := func(action perm.Action) bool {
+		switch policy.Check(action) {
+		case perm.Allow:
+			return true
+		case perm.Ask:
+			return approver != nil
+		default:
+			return false
+		}
+	}
+
 	var out []session.Tool
-	if policy.Check(perm.Read) == perm.Allow {
+	if permitted(perm.Read) {
 		out = append(out, readTool(policy))
 	}
-	if policy.Check(perm.Search) == perm.Allow {
+	if permitted(perm.Search) {
 		out = append(out, searchTool(policy))
+	}
+	if permitted(perm.Write) {
+		out = append(out, writeTool(policy, approver))
 	}
 	return out
 }
@@ -148,6 +190,148 @@ func searchTool(policy perm.Policy) session.Tool {
 			return matchView(args.Query, matches), nil
 		},
 	}
+}
+
+// writeTool describes and implements writing one file.
+//
+// The approval is collected here rather than in workspace because this is the
+// only layer that knows both what the change is and who could consent to it.
+// The old contents are read before the write so the question can show a diff:
+// a person asked to approve a path and a byte count has been told nothing.
+func writeTool(policy perm.Policy, approver Approver) session.Tool {
+	return session.Tool{
+		Definition: provider.Tool{
+			Name: "write_file",
+			Description: "Create or overwrite a UTF-8 text file in the current project, " +
+				"replacing its entire contents. The path must be relative to " +
+				"the project root; missing parent directories are created. " +
+				"Read the file first when editing one that exists, because " +
+				"anything omitted is lost. The user may refuse the write.",
+			Parameters: json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path to the file, relative to the project root, e.g. internal/cli/run.go"
+    },
+    "content": {
+      "type": "string",
+      "description": "The file's complete new contents. An empty string writes an empty file."
+    }
+  },
+  "required": ["path", "content"],
+  "additionalProperties": false
+}`),
+		},
+		Run: func(ctx context.Context, arguments string) (string, error) {
+			var args struct {
+				Path    string `json:"path"`
+				Content string `json:"content"`
+			}
+			if err := decode(arguments, &args); err != nil {
+				return "", err
+			}
+			if strings.TrimSpace(args.Path) == "" {
+				return "", errNeeds("path")
+			}
+
+			// Checked before prompting, not just before writing: asking a
+			// reader who has already walked away is worse than doing nothing.
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+
+			ws, err := open(ctx, policy)
+			if err != nil {
+				return "", err
+			}
+			defer ws.Close()
+
+			ok, err := consent(ctx, policy, approver, Request{
+				Action: perm.Write,
+				Target: args.Path,
+				Detail: change(ws, args.Path, args.Content),
+			})
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				return fmt.Sprintf("the user refused to write %s; the file is "+
+					"unchanged. Ask what they would prefer instead of trying "+
+					"again.", args.Path), nil
+			}
+
+			if err := ws.WriteFile(args.Path, []byte(args.Content)); err != nil {
+				return "", err
+			}
+			return wroteView(args.Path, args.Content), nil
+		},
+	}
+}
+
+// consent decides whether a gated action may proceed.
+//
+// An allowed action needs no question: agent mode with auto-approval is
+// exactly the case where the policy has already answered, and prompting anyway
+// would make the setting a lie. An asked action without an approver cannot
+// happen — [For] withholds the tool — so reaching it means the wiring is
+// wrong, and a bug that silently writes a file is worse than one that reports
+// itself.
+func consent(ctx context.Context, policy perm.Policy, approver Approver, req Request) (bool, error) {
+	switch policy.Check(req.Action) {
+	case perm.Allow:
+		return true, nil
+	case perm.Ask:
+		if approver == nil {
+			return false, fmt.Errorf("no way to ask the user about %s", req.Target)
+		}
+		return approver(ctx, req), nil
+	default:
+		return false, fmt.Errorf("this mode does not permit that")
+	}
+}
+
+// change describes what writing content to name would do.
+//
+// A file that cannot be read is not an obstacle to approving a write: what is
+// on disk being unshowable is itself worth telling the person, and refusing
+// the write over it would make binary and oversized files permanently
+// unwritable. Missing and unreadable are worded apart because one is a new
+// file and the other is a file about to be destroyed.
+func change(ws *workspace.Workspace, name, content string) string {
+	old, err := ws.ReadFile(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "this file does not exist yet; it would be created with " +
+			plural(lines(content), "line") + "\n\n" + diffView("", content)
+	case err != nil:
+		return fmt.Sprintf("the current contents cannot be shown (%v), so this "+
+			"write cannot be compared against them; it would replace the file "+
+			"with %s", err, plural(lines(content), "line"))
+	default:
+		return diffView(string(old), content)
+	}
+}
+
+// wroteView confirms a completed write.
+func wroteView(name, content string) string {
+	return fmt.Sprintf("wrote %s (%s)", name, plural(lines(content), "line"))
+}
+
+// lines counts the lines content occupies once written.
+func lines(content string) int {
+	if content == "" {
+		return 0
+	}
+	return strings.Count(strings.TrimSuffix(content, "\n"), "\n") + 1
+}
+
+// plural renders a count with its noun.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // open checks for cancellation and then opens the working directory.

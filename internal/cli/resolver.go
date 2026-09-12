@@ -104,6 +104,9 @@ func (e *env) newSession() (*session.Session, error) {
 // one statement in the program that decides what a session may touch.
 func newSessionFor(cfg config.Config, mode perm.Mode) *session.Session {
 	sess := session.New(cfg, newResolver(cfg))
-	sess.SetTools(tools.For(perm.New(mode))...)
+	// The approver is nil until an interface can put the question: no
+	// approval UI exists yet, so capabilities the mode gates behind one stay
+	// withheld rather than being offered and then refused.
+	sess.SetTools(tools.For(perm.New(mode), nil)...)
 	return sess
 }
