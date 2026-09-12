@@ -1,7 +1,14 @@
-// Package workspace is the only way this program reads the filesystem. Every
+// Package workspace is the only way this program touches the filesystem. Every
 // entry point takes a perm.Policy and asks it first, so a mode is enforced
 // here rather than merely described: there is no path to a file that skips the
 // check.
+//
+// What the policy cannot settle here is a write that a mode permits only after
+// the user approves it. This package has no user to ask: it holds a directory
+// and a policy, not a terminal. So it enforces the half of the answer that is
+// absolute, refusing what the mode forbids outright, and leaves the question
+// to the caller that owns an interface. A write nobody approved never arrives,
+// because the tool layer withholds the capability when it has nobody to ask.
 //
 // Containment is not done by inspecting paths. The tree is opened as an
 // os.Root, which refuses to reach outside itself no matter what a name looks
@@ -24,7 +31,8 @@ import (
 // this at a repository with a vendored dependency tree or a stray database
 // dump answers in a moment instead of reading gigabytes.
 const (
-	// maxFileBytes is the largest file that will be read or searched.
+	// maxFileBytes is the largest file that will be read or searched, and
+	// the most that a single write may put on disk.
 	maxFileBytes = 1 << 20
 	// maxMatches caps a search result. A query that hits more than this is
 	// too broad to be useful, and saying so is better than printing it.
@@ -54,7 +62,7 @@ var skipDirs = map[string]bool{
 	"__pycache__":  true,
 }
 
-// Workspace is a directory tree that can be read under a policy.
+// Workspace is a directory tree that can be read and written under a policy.
 type Workspace struct {
 	root   *os.Root
 	name   string
@@ -71,10 +79,9 @@ type Match struct {
 	Text string
 }
 
-// Open prepares dir for reading under policy. The policy is not consulted
-// here: opening a directory is not one of the actions a mode governs, and
-// deferring the check to the operation keeps the answer to "may I read this?"
-// in one place.
+// Open prepares dir for use under policy. The policy is not consulted here:
+// opening a directory is not one of the actions a mode governs, and deferring
+// the check to the operation keeps the answer to "may I do this?" in one place.
 func Open(dir string, policy perm.Policy) (*Workspace, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -187,15 +194,57 @@ func (w *Workspace) Search(query string) ([]Match, error) {
 	return matches, nil
 }
 
-// authorize resolves an action against the policy. Read and Search are the
-// only actions this package performs, and no mode answers Ask for either, so
-// anything short of Allow is a refusal: there is no prompt to fall back on
-// here, and inventing one would be worse than saying no.
-func (w *Workspace) authorize(a perm.Action) error {
-	if w.policy.Check(a) == perm.Allow {
-		return nil
+// WriteFile replaces the contents of one file inside the workspace, creating
+// it and any missing parent directories. Names are interpreted exactly as
+// ReadFile interprets them, so a caller that can name a file to read can name
+// the same file to write.
+//
+// The write is whole-file rather than incremental. A model that wants to change
+// three lines sends the file back with three lines changed, which costs tokens
+// but means a half-finished edit is impossible to express: either the new
+// contents arrive or the old ones stay.
+func (w *Workspace) WriteFile(name string, content []byte) error {
+	if err := w.authorize(perm.Write); err != nil {
+		return err
 	}
-	return &perm.DeniedError{Mode: w.policy.Mode(), Action: a}
+	rel, err := relative(name)
+	if err != nil {
+		return err
+	}
+	if len(content) > maxFileBytes {
+		return fmt.Errorf("workspace: write %s: contents are larger than %d bytes", name, maxFileBytes)
+	}
+
+	// A directory in the target's place is worth naming, because the root
+	// would otherwise report it as a permission or argument error and the
+	// real problem is that the name is already taken by something else.
+	if info, err := w.root.Stat(rel); err == nil && info.IsDir() {
+		return fmt.Errorf("workspace: write %s: is a directory", name)
+	}
+
+	if dir := filepath.Dir(rel); dir != "." {
+		if err := w.root.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("workspace: write %s: %w", name, err)
+		}
+	}
+	if err := w.root.WriteFile(rel, content, 0o644); err != nil {
+		return fmt.Errorf("workspace: write %s: %w", name, err)
+	}
+	return nil
+}
+
+// authorize resolves an action against the policy. Only Deny is refused here.
+// A mode that answers Ask has not said no; it has asked for an approval this
+// package cannot collect, and turning that into a refusal would put an answer
+// in the mouth of a user nobody consulted. The caller that owns an interface
+// settles the question before calling, and withholds the capability altogether
+// when it has nobody to ask, so a write that arrives here has already been
+// approved by whoever was entitled to approve it.
+func (w *Workspace) authorize(a perm.Action) error {
+	if w.policy.Check(a) == perm.Deny {
+		return &perm.DeniedError{Mode: w.policy.Mode(), Action: a}
+	}
+	return nil
 }
 
 // relative converts a caller's name into one the root will accept. Absolute

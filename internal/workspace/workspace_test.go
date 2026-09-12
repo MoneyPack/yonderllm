@@ -37,6 +37,20 @@ func write(t *testing.T, dir, rel, content string) string {
 	return path
 }
 
+// wantFile asserts what is on disk, which is the only account of a write that
+// does not take the writer's word for it.
+func wantFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(rel))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading back %q failed: %v", rel, err)
+	}
+	if got := string(data); got != content {
+		t.Errorf("%q holds %q, want %q", rel, got, content)
+	}
+}
+
 // wantDenied asserts that err is the refusal a mode produces for an action,
 // including the sentence a user would read.
 func wantDenied(t *testing.T, err error, mode perm.Mode, action perm.Action) {
@@ -447,6 +461,262 @@ func TestReadFileAcceptsASlashSeparatedName(t *testing.T) {
 
 	if _, err := w.ReadFile("a/b/c.txt"); err != nil {
 		t.Errorf("a slash-separated name was refused: %v", err)
+	}
+}
+
+func TestWriteFilePutsContentsOnDisk(t *testing.T) {
+	w, dir := open(t, perm.Code)
+
+	if err := w.WriteFile("todo.md", []byte("remember the milk\n")); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	wantFile(t, dir, "todo.md", "remember the milk\n")
+}
+
+func TestWriteFileCreatesMissingParentDirectories(t *testing.T) {
+	w, dir := open(t, perm.Code)
+
+	if err := w.WriteFile("a/b/c.txt", []byte("milk\n")); err != nil {
+		t.Fatalf("WriteFile into a directory that does not exist yet failed: %v", err)
+	}
+	wantFile(t, dir, "a/b/c.txt", "milk\n")
+}
+
+func TestWriteFileReplacesExistingContents(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "todo.md", "buy a boat\nremember the milk\n")
+
+	if err := w.WriteFile("todo.md", []byte("milk\n")); err != nil {
+		t.Fatalf("WriteFile over an existing file failed: %v", err)
+	}
+	// The write is whole-file, so the line the new contents leave out is gone
+	// rather than trailing after them.
+	wantFile(t, dir, "todo.md", "milk\n")
+}
+
+func TestWriteFileAcceptsEmptyContents(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "todo.md", "remember the milk\n")
+
+	if err := w.WriteFile("todo.md", nil); err != nil {
+		t.Fatalf("emptying a file failed: %v", err)
+	}
+	wantFile(t, dir, "todo.md", "")
+}
+
+func TestWriteFileIsRefusedInChatMode(t *testing.T) {
+	w, dir := open(t, perm.Chat)
+
+	err := w.WriteFile("todo.md", []byte("milk\n"))
+	wantDenied(t, err, perm.Chat, perm.Write)
+	if _, err := os.Stat(filepath.Join(dir, "todo.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused write left something on disk: %v", err)
+	}
+}
+
+func TestWriteFileProceedsInModesThatWouldAskFirst(t *testing.T) {
+	// Code mode answers Ask for a write, and this package has no user to ask.
+	// Reading that as a refusal would settle the question on the user's
+	// behalf, so the write proceeds: whoever owns the interface is the one
+	// that had to put the question, and the tool layer withholds the
+	// capability entirely when there is nobody to put it to.
+	for _, c := range []struct {
+		name     string
+		policy   perm.Policy
+		decision perm.Decision
+	}{
+		{"code", perm.New(perm.Code), perm.Ask},
+		{"agent", perm.New(perm.Agent), perm.Ask},
+		{"agent with auto-approval", perm.NewAutoApprove(perm.Agent), perm.Allow},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.policy.Check(perm.Write); got != c.decision {
+				t.Fatalf("the policy answers %s for a write, want %s", got, c.decision)
+			}
+
+			dir := t.TempDir()
+			w, err := Open(dir, c.policy)
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
+			}
+			defer w.Close()
+
+			if err := w.WriteFile("todo.md", []byte("milk\n")); err != nil {
+				t.Fatalf("WriteFile failed: %v", err)
+			}
+			wantFile(t, dir, "todo.md", "milk\n")
+		})
+	}
+}
+
+func TestWriteFileRefusesNamesOutsideTheWorkspace(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	outside := filepath.Join(filepath.Dir(dir), "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile outside the root failed: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(outside) })
+
+	for _, name := range []string{
+		"../outside.txt",
+		"..",
+		"sub/../../outside.txt",
+		outside,
+		"/etc/passwd",
+	} {
+		if err := w.WriteFile(name, []byte("milk\n")); err == nil {
+			t.Errorf("WriteFile(%q) was allowed, want a refusal", name)
+		}
+	}
+
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("reading back the file outside the workspace failed: %v", err)
+	}
+	if got := string(data); got != "secret\n" {
+		t.Errorf("the file outside the workspace now holds %q, want %q", got, "secret\n")
+	}
+}
+
+func TestWriteFileRefusesAnAbsoluteNameByName(t *testing.T) {
+	w, _ := open(t, perm.Code)
+
+	err := w.WriteFile("/etc/passwd", []byte("milk\n"))
+	if err == nil {
+		t.Fatal("an absolute name was accepted, want a refusal")
+	}
+	want := "workspace: /etc/passwd is outside the workspace"
+	if got := err.Error(); got != want {
+		t.Errorf("WriteFile failed with %q, want %q", got, want)
+	}
+}
+
+func TestWriteFileNeedsAName(t *testing.T) {
+	w, _ := open(t, perm.Code)
+
+	for _, name := range []string{"", "   "} {
+		err := w.WriteFile(name, []byte("milk\n"))
+		if err == nil {
+			t.Fatalf("WriteFile(%q) was accepted, want a refusal", name)
+		}
+		if got, want := err.Error(), "workspace: no file named"; got != want {
+			t.Errorf("WriteFile(%q) failed with %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestWriteFileRefusesADirectory(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "sub/file.txt", "milk\n")
+
+	err := w.WriteFile("sub", []byte("milk\n"))
+	if err == nil {
+		t.Fatal("writing over a directory was allowed, want a refusal")
+	}
+	want := "workspace: write sub: is a directory"
+	if got := err.Error(); got != want {
+		t.Errorf("WriteFile failed with %q, want %q", got, want)
+	}
+	// The directory is still a directory, with its contents intact.
+	wantFile(t, dir, "sub/file.txt", "milk\n")
+}
+
+func TestWriteFileReportsAFileStandingWhereADirectoryIsNeeded(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "notes.txt", "milk\n")
+
+	err := w.WriteFile("notes.txt/inner.txt", []byte("milk\n"))
+	if err == nil {
+		t.Fatal("writing beneath a plain file was allowed, want a refusal")
+	}
+	if !strings.HasPrefix(err.Error(), "workspace: write notes.txt/inner.txt: ") {
+		t.Errorf("WriteFile failed with %q, want it to name the file", err)
+	}
+	wantFile(t, dir, "notes.txt", "milk\n")
+}
+
+func TestWriteFileRefusesContentsLargerThanTheLimit(t *testing.T) {
+	w, dir := open(t, perm.Code)
+
+	err := w.WriteFile("big.log", bytes.Repeat([]byte("x"), maxFileBytes+1))
+	if err == nil {
+		t.Fatal("writing oversize contents was allowed, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("WriteFile failed with %q, want it to mention the size limit", err)
+	}
+	// The limit is checked before anything is opened, so no truncated stub
+	// is left behind.
+	if _, err := os.Stat(filepath.Join(dir, "big.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused write left something on disk: %v", err)
+	}
+}
+
+func TestWriteFileAcceptsContentsExactlyAtTheLimit(t *testing.T) {
+	w, dir := open(t, perm.Code)
+
+	if err := w.WriteFile("edge.log", bytes.Repeat([]byte("x"), maxFileBytes)); err != nil {
+		t.Fatalf("contents of exactly %d bytes were refused: %v", maxFileBytes, err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "edge.log"))
+	if err != nil {
+		t.Fatalf("Stat after the write failed: %v", err)
+	}
+	if info.Size() != maxFileBytes {
+		t.Errorf("the file is %d bytes, want %d", info.Size(), maxFileBytes)
+	}
+}
+
+func TestWriteFileAcceptsASlashSeparatedName(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "a/b/c.txt", "buy a boat\n")
+
+	if err := w.WriteFile("a/b/c.txt", []byte("milk\n")); err != nil {
+		t.Fatalf("a slash-separated name was refused: %v", err)
+	}
+	wantFile(t, dir, "a/b/c.txt", "milk\n")
+}
+
+func TestWriteFileRefusesASymlinkLeavingTheWorkspace(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	outside := filepath.Join(filepath.Dir(dir), "outside-write-target.txt")
+	if err := os.WriteFile(outside, []byte("secret\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile outside the root failed: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(outside) })
+
+	link := filepath.Join(dir, "escape.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		// Unprivileged Windows accounts cannot create symlinks. The
+		// containment this test describes is os.Root's, not ours.
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	if err := w.WriteFile("escape.txt", []byte("milk\n")); err == nil {
+		t.Error("writing through a symlink out of the workspace was allowed, want a refusal")
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("reading back the symlink target failed: %v", err)
+	}
+	if got := string(data); got != "secret\n" {
+		t.Errorf("the file outside the workspace now holds %q, want %q", got, "secret\n")
+	}
+}
+
+func TestWriteFileIsNotChangedByAutoApprovalInChatMode(t *testing.T) {
+	dir := t.TempDir()
+
+	w, err := Open(dir, perm.NewAutoApprove(perm.Chat))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer w.Close()
+
+	err = w.WriteFile("todo.md", []byte("milk\n"))
+	wantDenied(t, err, perm.Chat, perm.Write)
+	if _, err := os.Stat(filepath.Join(dir, "todo.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("auto-approval granted a write that chat mode forbids: %v", err)
 	}
 }
 
