@@ -13,6 +13,8 @@ import (
 
 	"yonderllm/internal/perm"
 	"yonderllm/internal/session"
+	"yonderllm/internal/shell"
+	"yonderllm/internal/workspace"
 )
 
 // workspaceDir builds a project for a tool to look at and makes it the working
@@ -761,5 +763,222 @@ func TestRunCommandRefusesAProgramOutsideTheWorkspace(t *testing.T) {
 		if got := wantErr(t, tool, arguments); !strings.Contains(got, "outside the workspace") {
 			t.Errorf("run_command(%s) error = %q, want it to mention the workspace boundary", arguments, got)
 		}
+	}
+}
+
+// numberedLines builds text long enough to exceed one tool result, with every
+// line distinguishable so a test can tell which end of it survived clipping.
+func numberedLines(n int) string {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	return b.String()
+}
+
+// A command that never finished is not a command that failed: the model is told
+// it was stopped, rather than being handed an exit status it would misread.
+func TestRanViewNamesATimeoutInsteadOfAnExitStatus(t *testing.T) {
+	got := ranView([]string{"go", "test"}, shell.Result{TimedOut: true})
+
+	if !strings.HasPrefix(got, "go test\n") {
+		t.Errorf("ranView() = %q, want it to open with the command", got)
+	}
+	if !strings.Contains(got, "timed out and was stopped") {
+		t.Errorf("ranView() = %q, want it to say the command was stopped", got)
+	}
+	if strings.Contains(got, "exit status") {
+		t.Errorf("ranView() = %q, want no exit status for a command that never finished", got)
+	}
+	if !strings.Contains(got, "(no output)") {
+		t.Errorf("ranView() = %q, want it to say there was no output", got)
+	}
+}
+
+// A failing command reports both halves of what happened: the status it exited
+// with and whatever it managed to print on the way out.
+func TestRanViewReportsTheExitStatusWithTheOutput(t *testing.T) {
+	got := ranView([]string{"go", "build"}, shell.Result{Code: 2, Output: "boom\n"})
+
+	if !strings.Contains(got, "exit status 2") {
+		t.Errorf("ranView() = %q, want it to name the exit status", got)
+	}
+	if !strings.Contains(got, "boom") {
+		t.Errorf("ranView() = %q, want it to carry the output", got)
+	}
+}
+
+// Output the runner refused to keep is accounted for in bytes, and the note
+// reads as English on either side of the singular.
+func TestRanViewCountsDroppedBytes(t *testing.T) {
+	for _, tc := range []struct {
+		dropped int
+		want    string
+	}{
+		{1, "1 byte of further output"},
+		{2, "2 bytes of further output"},
+	} {
+		got := ranView([]string{"go", "test"}, shell.Result{Output: "x\n", Dropped: tc.dropped})
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("ranView(Dropped: %d) = %q, want it to mention %q", tc.dropped, got, tc.want)
+		}
+	}
+}
+
+// Output too long for one tool result keeps its beginning, loses its end, and
+// says so, so the model does not read a truncated tail as the whole story.
+func TestRanViewClipsLongOutputAndSaysSo(t *testing.T) {
+	got := ranView([]string{"go", "test"}, shell.Result{Output: numberedLines(1200)})
+
+	if !strings.Contains(got, "more lines were not included") {
+		t.Errorf("ranView() = %q, want it to admit the output was clipped", got)
+	}
+	if !strings.Contains(got, "line 0\n") {
+		t.Errorf("ranView() = %q, want it to keep the first line", got)
+	}
+	if strings.Contains(got, "line 1199") {
+		t.Errorf("ranView() = %q, want the last line left out", got)
+	}
+}
+
+// The command echoed back to the user has to be unambiguous: an argument that
+// could be mistaken for two, or for nothing at all, is quoted.
+func TestCommandViewQuotesOnlyAmbiguousArguments(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"go", "env", "GOOS"}, "go env GOOS"},
+		{[]string{"echo", ""}, `echo ""`},
+		{[]string{"echo", "a b"}, `echo "a b"`},
+		{[]string{"echo", `a"b`}, `echo "a\"b"`},
+		{[]string{"echo", "a\tb"}, `echo "a\tb"`},
+	} {
+		if got := commandView(tc.args); got != tc.want {
+			t.Errorf("commandView(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
+// A mode that would ask cannot silently proceed when there is nobody to ask.
+// The refusal names the target so the model learns which step needs a human.
+func TestConsentFailsWhenThereIsNobodyToAsk(t *testing.T) {
+	req := Request{Action: perm.Write, Target: "notes.md"}
+
+	ok, err := consent(context.Background(), perm.New(perm.Agent), nil, req, false)
+
+	if ok {
+		t.Error("consent() approved the write with no approver, want it refused")
+	}
+	if err == nil || !strings.Contains(err.Error(), "no way to ask the user about notes.md") {
+		t.Errorf("consent() error = %v, want it to say there is no way to ask about the target", err)
+	}
+}
+
+// Short text passes through untouched: clipping is for what does not fit, and a
+// zero count is how the caller knows nothing was lost.
+func TestClipLeavesShortTextAlone(t *testing.T) {
+	body, omitted := clip("a\nb")
+
+	if body != "a\nb" || omitted != 0 {
+		t.Errorf("clip() = %q, %d, want %q, 0", body, omitted, "a\nb")
+	}
+}
+
+// Clipping cuts on a line boundary rather than mid-line, and every line it drops
+// is counted, so head plus omitted accounts for the whole text.
+func TestClipCutsOnALineBoundaryAndCountsTheRest(t *testing.T) {
+	const total = 1200
+
+	body, omitted := clip(numberedLines(total))
+
+	if len(body) > maxResultBytes {
+		t.Errorf("clip() kept %d bytes, want no more than %d", len(body), maxResultBytes)
+	}
+	if strings.HasSuffix(body, "\n") {
+		t.Error("clip() ended on a newline, want it to cut before one")
+	}
+	if omitted == 0 {
+		t.Fatal("clip() reported nothing omitted, want the tail counted")
+	}
+	if kept := lines(body); kept+omitted != total {
+		t.Errorf("clip() kept %d lines and omitted %d, want them to sum to %d", kept, omitted, total)
+	}
+}
+
+// The confirmation of a write counts lines, and counts them in English.
+func TestWroteViewCountsLines(t *testing.T) {
+	for _, tc := range []struct {
+		content string
+		want    string
+	}{
+		{"", "wrote main.go (0 lines)"},
+		{"package main\n", "wrote main.go (1 line)"},
+		{"package main\n\n", "wrote main.go (2 lines)"},
+	} {
+		if got := wroteView("main.go", tc.content); got != tc.want {
+			t.Errorf("wroteView(%q) = %q, want %q", tc.content, got, tc.want)
+		}
+	}
+}
+
+// Search results are headed by a count and the query, so a model reading them
+// knows how many it is looking at and what it asked for.
+func TestMatchViewHeadsResultsWithACount(t *testing.T) {
+	got := matchView("todo", []workspace.Match{
+		{Path: "a.go", Line: 3, Text: "// todo: fix"},
+		{Path: "b/c.go", Line: 11, Text: "// todo: also"},
+	})
+
+	if !strings.HasPrefix(got, `2 matches for "todo"`) {
+		t.Errorf("matchView() = %q, want it to open with the count and the query", got)
+	}
+	if !strings.Contains(got, "a.go:3: // todo: fix") {
+		t.Errorf("matchView() = %q, want the first match with its path and line", got)
+	}
+	if !strings.Contains(got, "b/c.go:11: // todo: also") {
+		t.Errorf("matchView() = %q, want the nested match with its path and line", got)
+	}
+}
+
+// Finding nothing is a result, not an error, and it repeats the query so the
+// model can see what it actually searched for.
+func TestMatchViewReportsNoMatchesAsAResult(t *testing.T) {
+	if got, want := matchView("todo", nil), `no matches for "todo"`; got != want {
+		t.Errorf("matchView() = %q, want %q", got, want)
+	}
+}
+
+// A file's contents arrive under their path, and an empty file says so rather
+// than arriving as a bare heading the model has to interpret.
+func TestFileViewHeadsContentWithThePath(t *testing.T) {
+	if got, want := fileView("a.go", "package a\n"), "a.go\npackage a"; got != want {
+		t.Errorf("fileView() = %q, want %q", got, want)
+	}
+	if got, want := fileView("a.go", "\n\n"), "a.go\n(empty file)"; got != want {
+		t.Errorf("fileView() = %q, want %q", got, want)
+	}
+}
+
+// Arguments the model got wrong come back as advice: what was missing, or that
+// what it sent was not JSON at all.
+func TestDecodeExplainsWhatWentWrong(t *testing.T) {
+	var into map[string]any
+
+	if err := decode("  ", &into); err == nil || !strings.Contains(err.Error(), "no arguments were given") {
+		t.Errorf("decode(\"\") error = %v, want it to say no arguments were given", err)
+	}
+	if err := decode("{", &into); err == nil || !strings.Contains(err.Error(), "not valid JSON") {
+		t.Errorf("decode(\"{\") error = %v, want it to say the arguments are not valid JSON", err)
+	}
+}
+
+// A required argument names itself in the refusal, and says that empty does not
+// count as given.
+func TestErrNeedsNamesTheField(t *testing.T) {
+	want := `the "path" argument is required and must not be empty`
+
+	if got := errNeeds("path").Error(); got != want {
+		t.Errorf("errNeeds(\"path\") = %q, want %q", got, want)
 	}
 }
