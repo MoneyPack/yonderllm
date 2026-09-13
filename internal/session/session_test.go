@@ -446,6 +446,88 @@ func TestSetProviderAndModel(t *testing.T) {
 	}
 }
 
+func TestAskAsksEachProviderForItsOwnModel(t *testing.T) {
+	// Model names do not travel across a fallback: each provider has its own
+	// catalogue, so the second attempt must ask for the second provider's
+	// model rather than repeating the first one's.
+	first := &fakeProvider{name: "groq", err: &provider.QuotaError{Provider: "groq"}}
+	second := &fakeProvider{name: "gemini", chunks: textChunks("ok")}
+	s := New(testConfig("groq", "gemini"), resolverFor(first, second))
+
+	deltas, _, _, err := collect(s.Ask(context.Background(), "hi"))
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if got := strings.Join(deltas, ""); got != "ok" {
+		t.Errorf("reply = %q, want %q", got, "ok")
+	}
+	if got := first.lastReq.Model; got != "groq-model" {
+		t.Errorf("groq was asked for model %q, want %q", got, "groq-model")
+	}
+	if got := second.lastReq.Model; got != "gemini-model" {
+		t.Errorf("gemini was asked for model %q, want %q", got, "gemini-model")
+	}
+}
+
+func TestAskSkipsProvidersWithNoModel(t *testing.T) {
+	// A provider with no model configured is refused locally, before any bytes
+	// leave the machine: it spends nothing from the free-tier request budget,
+	// and the chain carries on to a provider that can answer.
+	cfg := testConfig("groq", "gemini")
+	cfg.Providers["groq"] = config.ProviderConfig{}
+
+	first := &fakeProvider{name: "groq", chunks: textChunks("never asked")}
+	second := &fakeProvider{name: "gemini", chunks: textChunks("ok")}
+	s := New(cfg, resolverFor(first, second))
+
+	deltas, notices, done, err := collect(s.Ask(context.Background(), "hi"))
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if got := strings.Join(deltas, ""); got != "ok" {
+		t.Errorf("reply = %q, want %q", got, "ok")
+	}
+	if !done {
+		t.Error("Done was not emitted for a successful exchange")
+	}
+	if first.calls != 0 {
+		t.Errorf("groq called %d times, want 0: with no model there is nothing to ask for", first.calls)
+	}
+	if second.calls != 1 {
+		t.Errorf("gemini called %d times, want 1", second.calls)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "gemini") {
+		t.Errorf("notices = %v, want one announcing the fallback to gemini", notices)
+	}
+}
+
+func TestAskNamesTheProviderThatHasNoModel(t *testing.T) {
+	// With nowhere left to fall back to, the missing model has to be legible:
+	// a typed error naming the provider, not the bare 400 a remote endpoint
+	// returns for a request with an empty model.
+	cfg := testConfig("groq")
+	cfg.Providers["groq"] = config.ProviderConfig{}
+	p := &fakeProvider{name: "groq", chunks: textChunks("never asked")}
+	s := New(cfg, resolverFor(p))
+
+	_, _, done, err := collect(s.Ask(context.Background(), "hi"))
+	if err == nil {
+		t.Fatal("Ask succeeded with no model configured")
+	}
+	if !errors.Is(err, provider.ErrNoModel) {
+		t.Errorf("err = %v, want it to match provider.ErrNoModel", err)
+	}
+	if !strings.Contains(err.Error(), "groq") {
+		t.Errorf("err = %v, want it to name the provider that is short a model", err)
+	}
+	if done {
+		t.Error("Done was emitted for a failed exchange")
+	}
+	if p.calls != 0 {
+		t.Errorf("groq called %d times, want 0", p.calls)
+	}
+}
+
 func TestSetProviderNarrowsChainToConfiguredFallbacks(t *testing.T) {
 	// Fallbacks are configuration, not history. Switching the active provider
 	// to one of them leaves nothing behind it in the chain: the outgoing

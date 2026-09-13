@@ -36,9 +36,9 @@ func TestLoadDefaultsWithoutFile(t *testing.T) {
 }
 
 // TestBuiltInProvidersAreConfigured pins the catalogue that ships with the
-// binary. Every provider carries a base URL and the name of its key variable;
-// a default model is deliberately left empty except for surplus, whose model
-// ids are not discoverable without a credential.
+// binary. Every provider carries a base URL, the name of its key variable, and
+// a default model, so that a fresh install can fall back down the chain without
+// the user naming a model for each provider first.
 func TestBuiltInProvidersAreConfigured(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "absent.toml"))
 	if err != nil {
@@ -48,14 +48,17 @@ func TestBuiltInProvidersAreConfigured(t *testing.T) {
 	want := map[string]ProviderConfig{
 		"groq": {
 			BaseURL:   "https://api.groq.com/openai/v1",
+			Model:     "llama-3.3-70b-versatile",
 			APIKeyEnv: "GROQ_API_KEY",
 		},
 		"gemini": {
 			BaseURL:   "https://generativelanguage.googleapis.com/v1beta/openai",
+			Model:     "gemini-2.0-flash",
 			APIKeyEnv: "GEMINI_API_KEY",
 		},
 		"openrouter": {
 			BaseURL:   "https://openrouter.ai/api/v1",
+			Model:     "meta-llama/llama-3.3-70b-instruct:free",
 			APIKeyEnv: "OPENROUTER_API_KEY",
 		},
 		"surplus": {

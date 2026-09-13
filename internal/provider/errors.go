@@ -15,6 +15,12 @@ var ErrQuota = errors.New("provider quota exhausted")
 // is appropriate, but the user should also be told to fix the credential.
 var ErrAuth = errors.New("provider authentication failed")
 
+// ErrNoModel signals that a provider was about to be asked for a reply without
+// a model name. The fault is in the configuration rather than the backend, but
+// the core treats it like a provider failure: this provider cannot answer, so
+// the next one in the chain should get the turn.
+var ErrNoModel = errors.New("provider has no model configured")
+
 // QuotaError carries the retry hint some providers return alongside a 429.
 type QuotaError struct {
 	// Provider is the adapter that produced the error.
@@ -49,3 +55,26 @@ func (e *AuthError) Error() string {
 
 // Unwrap lets errors.Is(err, ErrAuth) match an *AuthError.
 func (e *AuthError) Unwrap() error { return ErrAuth }
+
+// NoModelError names the provider that has no model to ask for, and the setting
+// that would give it one.
+//
+// Refusing here, before any bytes leave the machine, is what turns a remote
+// "400 model is required" — indistinguishable from a dozen other bad-request
+// causes — into an error that says which provider is short a model and where to
+// put it.
+type NoModelError struct {
+	Provider string
+	// Hint names the configuration key or flag that supplies the model.
+	Hint string
+}
+
+func (e *NoModelError) Error() string {
+	if e.Hint != "" {
+		return fmt.Sprintf("%s: no model configured: set %s", e.Provider, e.Hint)
+	}
+	return fmt.Sprintf("%s: no model configured", e.Provider)
+}
+
+// Unwrap lets errors.Is(err, ErrNoModel) match a *NoModelError.
+func (e *NoModelError) Unwrap() error { return ErrNoModel }

@@ -351,8 +351,10 @@ func (s *Session) round(ctx context.Context, candidates []string, tools []provid
 		case errors.Is(err, errStopped):
 			return res, err
 
-		case errors.Is(err, provider.ErrQuota), errors.Is(err, provider.ErrAuth):
-			// Recoverable by trying the next provider.
+		case errors.Is(err, provider.ErrQuota), errors.Is(err, provider.ErrAuth), errors.Is(err, provider.ErrNoModel):
+			// This provider cannot answer, but the next one may: an exhausted
+			// allowance, a credential it will not accept, or no model to ask
+			// for are all faults of one provider rather than of the request.
 			errs = append(errs, err)
 
 		default:
@@ -376,6 +378,17 @@ func (s *Session) streamOne(ctx context.Context, name string, tools []provider.T
 	}
 
 	pc := s.cfg.Providers[name]
+	// Refused here rather than at the adapter: a request with no model comes
+	// back as a bare 400, which is what a malformed tool schema and a dozen
+	// other faults also look like. Failing locally names the provider that is
+	// short a model, and costs nothing in the free-tier request budget.
+	if pc.Model == "" {
+		return roundResult{provider: name}, &provider.NoModelError{
+			Provider: name,
+			Hint:     fmt.Sprintf("model under [providers.%s] in the config, or --model", name),
+		}
+	}
+
 	req := provider.Request{
 		Model:     pc.Model,
 		Messages:  s.history.Prompt(s.promptBudget(name)),

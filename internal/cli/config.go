@@ -348,17 +348,17 @@ daily_cap = %d
 [providers.groq]
 base_url    = "https://api.groq.com/openai/v1"
 api_key_env = "GROQ_API_KEY"
-# model     = "llama-3.3-70b-versatile"
+model       = "llama-3.3-70b-versatile"
 
 [providers.gemini]
 base_url    = "https://generativelanguage.googleapis.com/v1beta/openai"
 api_key_env = "GEMINI_API_KEY"
-# model     = "gemini-2.0-flash"
+model       = "gemini-2.0-flash"
 
 [providers.openrouter]
 base_url    = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
-# model     = "meta-llama/llama-3.3-70b-instruct:free"
+model       = "meta-llama/llama-3.3-70b-instruct:free"
 
 [providers.surplus]
 base_url    = "https://api.surplusintelligence.ai/v1"

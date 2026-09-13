@@ -86,14 +86,17 @@ func defaults() Config {
 		Providers: map[string]ProviderConfig{
 			"groq": {
 				BaseURL:   "https://api.groq.com/openai/v1",
+				Model:     "llama-3.3-70b-versatile",
 				APIKeyEnv: "GROQ_API_KEY",
 			},
 			"gemini": {
 				BaseURL:   "https://generativelanguage.googleapis.com/v1beta/openai",
+				Model:     "gemini-2.0-flash",
 				APIKeyEnv: "GEMINI_API_KEY",
 			},
 			"openrouter": {
 				BaseURL:   "https://openrouter.ai/api/v1",
+				Model:     "meta-llama/llama-3.3-70b-instruct:free",
 				APIKeyEnv: "OPENROUTER_API_KEY",
 			},
 			"surplus": {

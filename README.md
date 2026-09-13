@@ -243,7 +243,7 @@ These apply to every command and to the TUI.
 Four providers are configured out of the box. Each is reached over HTTP, and
 none of them is asked for a card by yonderllm.
 
-| Provider | Environment variable | Base URL | Suggested model |
+| Provider | Environment variable | Base URL | Default model |
 | --- | --- | --- | --- |
 | `groq` *(default)* | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash` |
