@@ -3,6 +3,7 @@ package tui
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -145,7 +146,12 @@ func toolArgs(arguments string) string {
 	// out, so newlines inside them are formatting rather than structure.
 	args = strings.Join(strings.Fields(args), " ")
 	if len(args) > maxToolArgBytes {
-		args = args[:maxToolArgBytes] + "..."
+		// Back off to a rune boundary so we never cut a character in half.
+		cut := maxToolArgBytes
+		for cut > 0 && !utf8.RuneStart(args[cut]) {
+			cut--
+		}
+		args = args[:cut] + "..."
 	}
 	return args
 }

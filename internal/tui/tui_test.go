@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -1203,6 +1204,18 @@ func TestToolArgsCollapsesWhitespaceAndTruncates(t *testing.T) {
 	}
 	if !strings.HasSuffix(long, "...") {
 		t.Errorf("truncated arguments do not say so: %q", long)
+	}
+
+	// Multi-byte input must never be cut in the middle of a character.
+	wide := toolArgs(strings.Repeat("世", maxToolArgBytes))
+	if !utf8.ValidString(wide) {
+		t.Errorf("truncation split a rune: %q", wide)
+	}
+	if len(wide) > maxToolArgBytes+3 {
+		t.Errorf("truncated arguments are %d bytes, want at most %d", len(wide), maxToolArgBytes+3)
+	}
+	if !strings.HasSuffix(wide, "...") {
+		t.Errorf("truncated arguments do not say so: %q", wide)
 	}
 }
 
