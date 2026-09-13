@@ -41,12 +41,18 @@ const helpText = `Commands
 Tools (code and agent modes)
   read_file              the model reads a file from this project
   search_files           the model searches this project for text
+  write_file             the model writes a file, once you allow it
+  run_command            the model runs a command, once you allow it
 
 Keys
   enter                  send
   ctrl+j                 newline
   pgup / pgdn            scroll the transcript
-  ctrl+c                 stop a reply in flight, or quit`
+  ctrl+c                 stop a reply in flight, or quit
+
+Keys while a call is waiting on you
+  y                      allow this call
+  anything else          deny it (denying is the default)`
 
 // runCommand interprets a slash command. The text is guaranteed to start with
 // a slash; anything it does not recognise is reported rather than sent to a

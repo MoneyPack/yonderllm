@@ -31,6 +31,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.finish()
 		return m, nil
+
+	case approvalRequestMsg:
+		// The reader is re-issued straight away rather than after the
+		// answer: the channel is unbuffered, so the next tool to ask
+		// stays parked in its send until this question is off screen,
+		// and one pending read is all it takes to accept it then.
+		m.ask(msg.request)
+		return m, waitForApproval(m.approvals)
+
+	case approvalAnswerMsg:
+		m.resolve(msg.request, msg.allowed)
+		return m, nil
 	}
 
 	return m.forward(msg)
@@ -38,6 +50,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey applies the keys the session owns and forwards the rest.
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While a question is on screen the keyboard belongs to the question. It
+	// is checked before anything else so that ctrl+c, Enter and the textarea
+	// cannot answer it by accident, and so that the answer is always one
+	// keystroke rather than a keystroke aimed at a hidden input.
+	if m.asking {
+		return m, answerApproval(m.question, allowsApproval(msg))
+	}
+
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		// While a reply is streaming, ctrl+c means "stop this", which is
@@ -70,6 +90,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m.forward(msg)
+}
+
+// allowsApproval reports whether a keystroke is a yes.
+//
+// Only a bare y is, in either case. Every other key — n, esc, ctrl+c, Enter, a
+// stray letter typed while the question appeared — is a no, because deny is the
+// default and the way to reach a yes has to be deliberate. Alt is excluded so
+// that a window-manager shortcut passing through cannot approve anything.
+func allowsApproval(msg tea.KeyMsg) bool {
+	if msg.Type != tea.KeyRunes || msg.Alt || len(msg.Runes) != 1 {
+		return false
+	}
+	return msg.Runes[0] == 'y' || msg.Runes[0] == 'Y'
 }
 
 // handleEnter submits the input, if there is anything to submit.

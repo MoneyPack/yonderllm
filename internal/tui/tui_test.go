@@ -21,6 +21,7 @@ import (
 	"yonderllm/internal/perm"
 	"yonderllm/internal/provider"
 	"yonderllm/internal/session"
+	"yonderllm/internal/tools"
 	"yonderllm/internal/workspace"
 )
 
@@ -88,15 +89,25 @@ func newTestModel(t *testing.T, p *stubProvider) model {
 }
 
 // newTestModelMode is newTestModel with the permission mode chosen by the
-// caller, for the commands that only work outside chat mode.
+// caller, for the commands that only work outside chat mode. The approvals
+// bridge is nil, which is what a model gets when no interface can be asked.
 func newTestModelMode(t *testing.T, p *stubProvider, mode perm.Mode) model {
+	t.Helper()
+	return newTestModelApprovals(t, p, mode, nil)
+}
+
+// newTestModelApprovals is newTestModelMode with an approvals bridge attached,
+// for the tests that drive a question through the message loop. It is a
+// separate helper rather than another parameter on newTestModel so that the
+// dozens of tests with nothing to approve stay unchanged.
+func newTestModelApprovals(t *testing.T, p *stubProvider, mode perm.Mode, approvals *Approvals) model {
 	t.Helper()
 
 	sess := session.New(testConfig(), func(name string) (provider.Provider, error) {
 		return p, nil
 	})
 
-	m := newModel(sess, mode)
+	m := newModel(sess, mode, approvals)
 	m.resize(60, 24)
 	return m
 }
@@ -193,7 +204,7 @@ func TestViewBeforeSizeShowsBrandOnly(t *testing.T) {
 	sess := session.New(testConfig(), func(string) (provider.Provider, error) {
 		return &stubProvider{name: "stub"}, nil
 	})
-	m := newModel(sess, perm.Chat)
+	m := newModel(sess, perm.Chat, nil)
 
 	out := m.View()
 	if !strings.Contains(out, brandName) {
@@ -217,6 +228,17 @@ func TestViewShowsBrandProviderAndFooter(t *testing.T) {
 	m.busy = true
 	if out := m.View(); !strings.Contains(out, "ctrl+c stop") {
 		t.Errorf("busy footer missing the stop hint:\n%s", out)
+	}
+
+	// A pending question owns every key, ctrl+c included, so the footer has
+	// to stop offering keys that no longer do what it says.
+	m.asking = true
+	out = m.View()
+	if !strings.Contains(out, "y allow") {
+		t.Errorf("asking footer missing the allow hint:\n%s", out)
+	}
+	if strings.Contains(out, "ctrl+c stop") {
+		t.Errorf("asking footer still offers a key the question has taken:\n%s", out)
 	}
 }
 
@@ -780,7 +802,7 @@ func TestUsageCommandShowsTheCap(t *testing.T) {
 	sess := session.New(cfg, func(string) (provider.Provider, error) {
 		return &stubProvider{name: "stub"}, nil
 	})
-	m := newModel(sess, perm.Chat)
+	m := newModel(sess, perm.Chat, nil)
 	m.resize(60, 24)
 
 	m.append(block{kind: blockInfo, text: m.usageReport()})
@@ -1209,5 +1231,364 @@ func TestClipLinesReportsWhatItDropped(t *testing.T) {
 	}
 	if !strings.Contains(out, "... 10 more lines") {
 		t.Errorf("the dropped count is missing:\n%s", out)
+	}
+}
+
+// pendingApproval builds a question of the shape Ask sends, with a reply channel
+// a test can read the decision back out of.
+func pendingApproval(action perm.Action, target, detail string) approvalRequest {
+	return approvalRequest{
+		action: action,
+		target: target,
+		detail: detail,
+		reply:  make(chan bool, 1),
+	}
+}
+
+// asking puts a question on screen and hands back both the model and the request
+// as the model now holds it, with the id it was given.
+func asking(t *testing.T, m model, req approvalRequest) (model, approvalRequest, tea.Cmd) {
+	t.Helper()
+
+	m, cmd := step(t, m, approvalRequestMsg{request: req})
+	if !m.asking {
+		t.Fatal("the model is not asking after a request arrived")
+	}
+	return m, m.question, cmd
+}
+
+func TestApprovalRequestIsDrawnAsAQuestion(t *testing.T) {
+	m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Code, NewApprovals())
+
+	// The question is a transcript block like any other, tagged with the
+	// action so the user can see at a glance what kind of call this is.
+	m, req, cmd := asking(t, m, pendingApproval(perm.Write, "notes.md", "+ hello"))
+
+	last := m.blocks[len(m.blocks)-1]
+	if last.kind != blockApproval {
+		t.Errorf("last block kind = %v, want blockApproval", last.kind)
+	}
+	if last.tag != "write" {
+		t.Errorf("question tag = %q, want %q", last.tag, "write")
+	}
+	if req.id != "approval-1" {
+		t.Errorf("question id = %q, want %q", req.id, "approval-1")
+	}
+	if last.id != req.id {
+		t.Errorf("block id = %q, want %q", last.id, req.id)
+	}
+
+	for _, want := range []string{"notes.md", "+ hello", approvalPrompt} {
+		if !strings.Contains(last.text, want) {
+			t.Errorf("the question is missing %q:\n%s", want, last.text)
+		}
+	}
+
+	// Handling one question has to arm the listener for the next one, or the
+	// second tool call of a session would wait forever.
+	if cmd == nil {
+		t.Error("a question did not ask for the next one")
+	}
+}
+
+func TestApprovalDetailIsClippedToAScreen(t *testing.T) {
+	m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Code, NewApprovals())
+
+	var lines []string
+	for i := range maxApprovalLines + 5 {
+		lines = append(lines, fmt.Sprintf("+ line %d", i+1))
+	}
+
+	// A diff longer than a screen has stopped helping anyone judge the call,
+	// so the prompt says how much it is not showing.
+	m, _, _ = asking(t, m, pendingApproval(perm.Write, "big.txt", strings.Join(lines, "\n")))
+
+	text := m.blocks[len(m.blocks)-1].text
+	if strings.Contains(text, fmt.Sprintf("+ line %d", maxApprovalLines+1)) {
+		t.Errorf("a line past the limit survived:\n%s", text)
+	}
+	if !strings.Contains(text, "... 5 more lines") {
+		t.Errorf("the dropped count is missing:\n%s", text)
+	}
+}
+
+func TestOnlyABareYAllowsACall(t *testing.T) {
+	cases := []struct {
+		name string
+		key  tea.KeyMsg
+		want bool
+	}{
+		{"a lowercase y allows", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}, true},
+		{"an uppercase Y allows", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}}, true},
+		{"n denies", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}, false},
+		{"esc denies", tea.KeyMsg{Type: tea.KeyEsc}, false},
+		{"ctrl+c denies", tea.KeyMsg{Type: tea.KeyCtrlC}, false},
+		{"enter denies", tea.KeyMsg{Type: tea.KeyEnter}, false},
+		{"a stray letter denies", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, false},
+		{"alt+y denies", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}, Alt: true}, false},
+		{"yes typed as a word denies", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("yes")}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := allowsApproval(tc.key); got != tc.want {
+				t.Errorf("allowsApproval(%v) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAnsweringSendsTheDecisionBackToTheTool(t *testing.T) {
+	cases := []struct {
+		name string
+		key  tea.KeyMsg
+		want bool
+	}{
+		{"y allows the call", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}, true},
+		{"n denies the call", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}, false},
+		{"esc denies the call", tea.KeyMsg{Type: tea.KeyEsc}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Code, NewApprovals())
+			m, req, _ := asking(t, m, pendingApproval(perm.Exec, "go", `go test ./...`))
+
+			// The decision has to reach the goroutine parked inside
+			// Ask, and the message loop has to hear about it so the
+			// transcript can be rewritten.
+			_, cmd := step(t, m, tc.key)
+			if cmd == nil {
+				t.Fatal("a keystroke did not answer the question")
+			}
+
+			msg, ok := cmd().(approvalAnswerMsg)
+			if !ok {
+				t.Fatalf("answering produced %T, want tui.approvalAnswerMsg", cmd())
+			}
+			if msg.allowed != tc.want {
+				t.Errorf("answer message allowed = %v, want %v", msg.allowed, tc.want)
+			}
+			if msg.request.id != req.id {
+				t.Errorf("answer names %q, want %q", msg.request.id, req.id)
+			}
+
+			select {
+			case got := <-req.reply:
+				if got != tc.want {
+					t.Errorf("the tool was told %v, want %v", got, tc.want)
+				}
+			default:
+				t.Error("the tool was never told anything")
+			}
+		})
+	}
+}
+
+func TestTheAnswerReplacesTheQuestionInPlace(t *testing.T) {
+	m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Code, NewApprovals())
+	m, req, _ := asking(t, m, pendingApproval(perm.Write, "notes.md", "+ hello"))
+
+	at := len(m.blocks) - 1
+	// Nothing promises the question is still the last block by the time the
+	// answer comes back, so the block is found by id.
+	m.append(block{kind: blockInfo, text: "something else happened"})
+
+	before := len(m.blocks)
+	m, cmd := step(t, m, approvalAnswerMsg{request: req, allowed: true})
+
+	if cmd != nil {
+		t.Errorf("recording an answer asked for more work: %T", cmd())
+	}
+	if len(m.blocks) != before {
+		t.Errorf("blocks = %d, want %d — the answer was appended, not written in", len(m.blocks), before)
+	}
+	if m.asking {
+		t.Error("the model is still asking after the answer arrived")
+	}
+	if m.question != (approvalRequest{}) {
+		t.Errorf("question = %+v, want it cleared", m.question)
+	}
+
+	answered := m.blocks[at]
+	if answered.kind != blockApproval || answered.id != req.id {
+		t.Fatalf("block %d = %+v, want the question rewritten", at, answered)
+	}
+	if !strings.Contains(answered.text, approvalAllowed) {
+		t.Errorf("the decision is missing:\n%s", answered.text)
+	}
+	if strings.Contains(transcript(m), approvalPrompt) {
+		t.Errorf("the prompt outlived the answer:\n%s", transcript(m))
+	}
+}
+
+func TestDenyingIsRecordedAsSuch(t *testing.T) {
+	m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Agent, NewApprovals())
+	m, req, _ := asking(t, m, pendingApproval(perm.Exec, "rm", "rm -rf ."))
+
+	m, _ = step(t, m, approvalAnswerMsg{request: req, allowed: false})
+
+	last := m.blocks[len(m.blocks)-1]
+	if !strings.Contains(last.text, approvalDenied) {
+		t.Errorf("a refusal is not recorded:\n%s", last.text)
+	}
+}
+
+func TestTheQuestionOwnsTheKeyboardWhileItIsOpen(t *testing.T) {
+	m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Code, NewApprovals())
+	m = typing(m, "a prompt half written")
+	m, _, _ = asking(t, m, pendingApproval(perm.Write, "notes.md", "+ hello"))
+
+	before := len(m.blocks)
+
+	// Enter is an answer, not a submission: the half-written prompt stays
+	// where it is and no exchange starts.
+	m, cmd := step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := cmd().(approvalAnswerMsg); !ok {
+		t.Fatalf("enter produced %T, want tui.approvalAnswerMsg", cmd())
+	}
+	if got := m.input.Value(); got != "a prompt half written" {
+		t.Errorf("input = %q, want the text left alone", got)
+	}
+	if m.busy {
+		t.Error("enter started an exchange while a question was open")
+	}
+	if len(m.blocks) != before {
+		t.Errorf("blocks = %d, want %d — enter added to the transcript", len(m.blocks), before)
+	}
+}
+
+func TestCtrlCAnswersTheQuestionRatherThanQuitting(t *testing.T) {
+	m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Code, NewApprovals())
+	m, _, _ = asking(t, m, pendingApproval(perm.Exec, "go", "go build ./..."))
+
+	// Ctrl+c with a question on screen is a refusal of that call. Quitting
+	// the session out from under a parked tool is not what was asked for.
+	_, cmd := step(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	msg, ok := cmd().(approvalAnswerMsg)
+	if !ok {
+		t.Fatalf("ctrl+c produced %T, want tui.approvalAnswerMsg", cmd())
+	}
+	if msg.allowed {
+		t.Error("ctrl+c allowed the call")
+	}
+}
+
+func TestTextBeforeAQuestionIsCommittedFirst(t *testing.T) {
+	m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Code, NewApprovals())
+	m = streaming(m, "stub")
+
+	// Whatever the model said on its way to the call belongs above the
+	// question, not below the decision.
+	m, _ = step(t, m, streamEventMsg{seq: 1, packet: streamPacket{event: session.Event{Delta: "I will write that file", Provider: "stub"}}})
+	m, _, _ = asking(t, m, pendingApproval(perm.Write, "notes.md", "+ hello"))
+
+	if m.pending != "" {
+		t.Errorf("pending = %q, want it committed before the question", m.pending)
+	}
+	if n := len(m.blocks); n < 2 {
+		t.Fatalf("blocks = %d, want the text and the question", n)
+	}
+	said := m.blocks[len(m.blocks)-2]
+	if said.kind != blockAssistant || said.text != "I will write that file" {
+		t.Errorf("block above the question = %+v, want the assistant text", said)
+	}
+}
+
+func TestEachQuestionGetsItsOwnId(t *testing.T) {
+	m := newTestModelApprovals(t, &stubProvider{name: "stub"}, perm.Code, NewApprovals())
+
+	first := pendingApproval(perm.Write, "one.md", "+ one")
+	m, first, _ = asking(t, m, first)
+	m, _ = step(t, m, approvalAnswerMsg{request: first, allowed: true})
+
+	second := pendingApproval(perm.Write, "two.md", "+ two")
+	m, second, _ = asking(t, m, second)
+
+	// Ids have to differ, or answering the second question would rewrite
+	// the record of the first.
+	if second.id == first.id {
+		t.Errorf("both questions are %q, want distinct ids", second.id)
+	}
+
+	m, _ = step(t, m, approvalAnswerMsg{request: second, allowed: false})
+
+	if got := transcript(m); !strings.Contains(got, approvalAllowed) || !strings.Contains(got, approvalDenied) {
+		t.Errorf("both decisions should be on record:\n%s", got)
+	}
+}
+
+func TestAskCarriesTheRequestAndWaitsForTheAnswer(t *testing.T) {
+	a := NewApprovals()
+	answered := make(chan bool, 1)
+	go func() {
+		answered <- a.Ask(context.Background(), tools.Request{Action: perm.Exec, Target: "go", Detail: `go test ./...`})
+	}()
+
+	// What the tool describes is what the interface is asked about.
+	req := <-a.ch
+	if req.action != perm.Exec || req.target != "go" || req.detail != `go test ./...` {
+		t.Errorf("request = %+v, want the tool's own words", req)
+	}
+
+	req.reply <- true
+	if !<-answered {
+		t.Error("Ask returned deny after the user allowed the call")
+	}
+}
+
+func TestAskDeniesWhenNobodyCanAnswer(t *testing.T) {
+	a := NewApprovals()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// The exchange is already over, so there is no interface waiting to read
+	// this question. It must not become a yes by default.
+	if a.Ask(ctx, tools.Request{Action: perm.Write, Target: "notes.md"}) {
+		t.Error("Ask allowed a call nobody was asked about")
+	}
+}
+
+func TestAskDeniesWhenTheExchangeIsCancelledMidQuestion(t *testing.T) {
+	a := NewApprovals()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	answered := make(chan bool, 1)
+	go func() {
+		answered <- a.Ask(ctx, tools.Request{Action: perm.Write, Target: "notes.md"})
+	}()
+
+	// The question reached the screen, then the user pressed ctrl+c on the
+	// exchange itself. A question nobody can answer any more is a no.
+	<-a.ch
+	cancel()
+
+	if <-answered {
+		t.Error("Ask allowed a call after the exchange was cancelled")
+	}
+}
+
+func TestAnsweringAnAbandonedQuestionDoesNotBlockTheLoop(t *testing.T) {
+	req := pendingApproval(perm.Write, "notes.md", "+ hello")
+	req.id = "approval-1"
+	req.reply <- false
+
+	// A loop parked in a send is an interface that has stopped redrawing, so
+	// an answer with nowhere to go is dropped and only the transcript is
+	// updated.
+	msg, ok := answerApproval(req, true)().(approvalAnswerMsg)
+	if !ok {
+		t.Fatal("answering an abandoned question produced no message")
+	}
+	if !msg.allowed || msg.request.id != req.id {
+		t.Errorf("answer message = %+v, want the decision for %q", msg, req.id)
+	}
+}
+
+func TestWithoutApprovalsNothingIsWaitedOn(t *testing.T) {
+	// A session with no approval bridge — a one-shot run, say — must not
+	// hand the loop a command that blocks forever.
+	if cmd := waitForApproval(nil); cmd != nil {
+		t.Error("waitForApproval(nil) returned a command")
 	}
 }

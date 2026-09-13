@@ -31,10 +31,14 @@ type styles struct {
 	toolTag  lipgloss.Style
 	notice   lipgloss.Style
 	errorTag lipgloss.Style
-	body     lipgloss.Style
-	muted    lipgloss.Style
-	footer   lipgloss.Style
-	cursor   lipgloss.Style
+	// approvalTag labels a question the user has to answer. It is the
+	// loudest style in the set on purpose: everything else in the
+	// transcript can be skimmed, and this is the one thing that cannot.
+	approvalTag lipgloss.Style
+	body        lipgloss.Style
+	muted       lipgloss.Style
+	footer      lipgloss.Style
+	cursor      lipgloss.Style
 }
 
 // newStyles builds the style set.
@@ -52,9 +56,14 @@ func newStyles() styles {
 		toolTag:  lipgloss.NewStyle().Bold(true).Foreground(toolFG),
 		notice:   lipgloss.NewStyle().Foreground(noticeFG),
 		errorTag: lipgloss.NewStyle().Bold(true).Foreground(errorFG),
-		body:     lipgloss.NewStyle(),
-		muted:    lipgloss.NewStyle().Foreground(mutedFG),
-		footer:   lipgloss.NewStyle().Foreground(mutedFG),
-		cursor:   lipgloss.NewStyle().Bold(true).Foreground(brandFG),
+		// The approval prompt borrows the notice colour, because it is
+		// the same sort of claim — the session telling the user
+		// something about itself rather than a model speaking — but it
+		// is bold, since it is asking rather than reporting.
+		approvalTag: lipgloss.NewStyle().Bold(true).Foreground(noticeFG),
+		body:        lipgloss.NewStyle(),
+		muted:       lipgloss.NewStyle().Foreground(mutedFG),
+		footer:      lipgloss.NewStyle().Foreground(mutedFG),
+		cursor:      lipgloss.NewStyle().Bold(true).Foreground(brandFG),
 	}
 }

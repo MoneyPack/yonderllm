@@ -24,15 +24,19 @@ import (
 //
 // Session is required; everything the interface can do — asking, switching
 // providers, reporting usage — is a method on it. Mode is the permission mode
-// shown in the header. In and Out are optional: when nil the program reads the
-// real terminal and writes to it, which is what the command line wants, and
+// shown in the header. Approvals is the channel the gated tools ask over, and it
+// must be the same value whose Ask was handed to the tools; when it is nil the
+// interface simply never receives a question, which is correct for a session
+// built without an approver. In and Out are optional: when nil the program reads
+// the real terminal and writes to it, which is what the command line wants, and
 // when supplied the program is driven by those streams instead, which is what a
 // test wants.
 type Options struct {
-	Session *session.Session
-	Mode    perm.Mode
-	In      io.Reader
-	Out     io.Writer
+	Session   *session.Session
+	Mode      perm.Mode
+	Approvals *Approvals
+	In        io.Reader
+	Out       io.Writer
 }
 
 // Run opens an interactive session and blocks until the user quits.
@@ -52,7 +56,7 @@ func Run(opts Options) error {
 		teaOpts = append(teaOpts, tea.WithOutput(opts.Out))
 	}
 
-	if _, err := tea.NewProgram(newModel(opts.Session, opts.Mode), teaOpts...).Run(); err != nil {
+	if _, err := tea.NewProgram(newModel(opts.Session, opts.Mode, opts.Approvals), teaOpts...).Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
 	}
 	return nil

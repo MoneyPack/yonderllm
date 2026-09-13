@@ -28,6 +28,10 @@ const (
 	blockError
 	// blockInfo is local output from a slash command.
 	blockInfo
+	// blockApproval is a question a tool needs answered, and later the
+	// answer it was given. It is its own kind because it is the only block
+	// the user is expected to act on rather than read.
+	blockApproval
 )
 
 // block is one entry in the transcript.
@@ -74,6 +78,18 @@ func (b block) render(s styles, width int) string {
 		return s.notice.Render("· " + strings.TrimRight(b.text, "\n"))
 	case blockError:
 		return lipgloss.JoinVertical(lipgloss.Left, s.errorTag.Render("error"), s.errorTag.Render(strings.TrimRight(b.text, "\n")))
+	case blockApproval:
+		tag := b.tag
+		if tag == "" {
+			tag = "approval"
+		} else {
+			tag = "approval " + tag
+		}
+		// The tag carries the word rather than relying on colour, and
+		// stays the same once the question has been answered: the block
+		// is a record of a decision either way, and a transcript that
+		// renamed itself after the fact would be harder to read back.
+		return lipgloss.JoinVertical(lipgloss.Left, s.approvalTag.Render(tag), body)
 	default:
 		return s.muted.Render(body)
 	}

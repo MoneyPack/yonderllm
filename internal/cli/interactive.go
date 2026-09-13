@@ -35,11 +35,20 @@ func (e *env) runTUI() error {
 		return err
 	}
 
+	// The approvals bridge is created before the session because the session
+	// needs its Ask method and the interface needs the value itself. It is
+	// one object seen from two sides: a tool call sends a question down it,
+	// the message loop reads that question out. Creating it here — the only
+	// place that knows a human is at the keyboard — is what turns perm.Ask
+	// from a withheld capability into a real prompt.
+	approvals := tui.NewApprovals()
+
 	return tui.Run(tui.Options{
-		Session: newSessionFor(cfg, mode),
-		Mode:    mode,
-		In:      e.in,
-		Out:     e.out,
+		Session:   newSessionFor(cfg, mode, approvals.Ask),
+		Mode:      mode,
+		Approvals: approvals,
+		In:        e.in,
+		Out:       e.out,
 	})
 }
 

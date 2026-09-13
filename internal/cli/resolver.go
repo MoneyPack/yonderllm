@@ -91,7 +91,12 @@ func (e *env) newSession() (*session.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newSessionFor(cfg, mode), nil
+	// A nil approver: newSession serves the non-interactive paths — --json,
+	// a pipe, a subcommand that prints and exits — where there is nobody to
+	// put the question to. Capabilities the mode gates behind an approval
+	// are withheld from the model entirely rather than offered and then
+	// always refused.
+	return newSessionFor(cfg, mode, nil), nil
 }
 
 // newSessionFor builds a conversation from an already-resolved configuration
@@ -102,11 +107,14 @@ func (e *env) newSession() (*session.Session, error) {
 // session assembled identically. Attaching the tools here rather than at each
 // call site means a mode can never reach a model with the wrong hands: there is
 // one statement in the program that decides what a session may touch.
-func newSessionFor(cfg config.Config, mode perm.Mode) *session.Session {
+//
+// approver may be nil, and that is the meaningful distinction between the
+// callers: with one, a gated capability is offered and each use asks; without
+// one, the capability never reaches the model. Passing it in rather than
+// deciding here keeps the question of *who can be asked* with the caller that
+// owns an interface, which is the only code able to answer it.
+func newSessionFor(cfg config.Config, mode perm.Mode, approver tools.Approver) *session.Session {
 	sess := session.New(cfg, newResolver(cfg))
-	// The approver is nil until an interface can put the question: no
-	// approval UI exists yet, so capabilities the mode gates behind one stay
-	// withheld rather than being offered and then refused.
-	sess.SetTools(tools.For(perm.New(mode), nil)...)
+	sess.SetTools(tools.For(perm.New(mode), approver)...)
 	return sess
 }

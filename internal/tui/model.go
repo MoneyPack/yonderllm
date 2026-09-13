@@ -55,6 +55,17 @@ type model struct {
 	pending  string
 	answered string
 
+	// approvals is the channel the tools ask their questions over, and
+	// asking is whether one of those questions is on screen. While it is,
+	// the keyboard belongs to the question: a goroutine inside a tool call
+	// is parked waiting for the answer, and nothing else can come first.
+	approvals *Approvals
+	question  approvalRequest
+	asking    bool
+	// asked counts questions, only so that each one gets an id its answer
+	// can be matched against when it comes to rewrite the block.
+	asked int
+
 	width  int
 	height int
 	// ready is false until the first WindowSizeMsg arrives. Bubble Tea
@@ -65,7 +76,10 @@ type model struct {
 
 // newModel builds a session model. It does not touch the terminal, so tests can
 // drive Update and View directly.
-func newModel(sess *session.Session, mode perm.Mode) model {
+//
+// approvals may be nil, and is nil wherever the gated tools were built without
+// an approver: with nothing able to ask, there is nothing to answer.
+func newModel(sess *session.Session, mode perm.Mode, approvals *Approvals) model {
 	s := newStyles()
 
 	input := textarea.New()
@@ -79,11 +93,12 @@ func newModel(sess *session.Session, mode perm.Mode) model {
 	input.Focus()
 
 	m := model{
-		sess:   sess,
-		mode:   mode,
-		styles: s,
-		input:  input,
-		view:   viewport.New(0, 0),
+		sess:      sess,
+		mode:      mode,
+		styles:    s,
+		input:     input,
+		view:      viewport.New(0, 0),
+		approvals: approvals,
 	}
 	m.blocks = []block{{kind: blockInfo, text: m.greeting()}}
 	return m
@@ -100,8 +115,13 @@ func (m model) greeting() string {
 }
 
 // Init satisfies tea.Model.
+//
+// Listening for approval requests starts here rather than when the first tool
+// call happens, because the request arrives from a goroutine that is already
+// parked: if nothing were reading the channel, a tool would hang before the
+// question ever reached the screen.
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, waitForApproval(m.approvals))
 }
 
 // resize recomputes the layout for a new terminal size.
@@ -205,6 +225,54 @@ func toolBlock(run *session.ToolRun) block {
 		tag:  run.Name,
 		id:   run.ID,
 		text: toolView(run.Arguments, result),
+	}
+}
+
+// ask puts a question on screen and gives the keyboard to it.
+//
+// The question is a transcript block like any other, so it keeps its place in the
+// sequence: the user sees what the model said, then the call it wants to make,
+// then their own decision, in the order those things happened.
+func (m *model) ask(req approvalRequest) {
+	// Whatever the model said on its way to this call belongs above the
+	// question, for the same reason it does above a tool call.
+	m.commitPending()
+
+	m.asked++
+	req.id = fmt.Sprintf("approval-%d", m.asked)
+
+	m.question = req
+	m.asking = true
+	m.append(approvalBlock(req, approvalPrompt))
+}
+
+// resolve closes the open question, rewriting its block with the decision.
+//
+// The block is matched on id rather than assumed to be last, because a question
+// is answered from the message loop and nothing guarantees that no other block
+// arrived in between.
+func (m *model) resolve(req approvalRequest, allowed bool) {
+	m.asking = false
+	m.question = approvalRequest{}
+
+	b := approvalBlock(req, approvalOutcome(allowed))
+	for i, existing := range m.blocks {
+		if existing.kind == blockApproval && existing.id != "" && existing.id == req.id {
+			m.blocks[i] = b
+			m.refresh()
+			return
+		}
+	}
+	m.append(b)
+}
+
+// approvalBlock builds the transcript entry for one question.
+func approvalBlock(req approvalRequest, outcome string) block {
+	return block{
+		kind: blockApproval,
+		tag:  req.action.String(),
+		id:   req.id,
+		text: approvalView(req, outcome),
 	}
 }
 

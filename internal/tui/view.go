@@ -73,12 +73,18 @@ func (m model) rule() string {
 }
 
 // footer draws the keybinding hint, which changes with what the keys currently
-// do: ctrl+c stops a reply while one is streaming and quits when none is.
+// do: a pending question owns the whole keyboard, ctrl+c stops a reply while one
+// is streaming, and it quits when none is.
 func (m model) footer() string {
 	var hint string
-	if m.busy {
+	switch {
+	case m.asking:
+		// The question holds every key, including ctrl+c, so naming the
+		// stop hint here would be a lie about what the terminal does.
+		hint = "y allow · anything else deny"
+	case m.busy:
 		hint = "answering… ctrl+c stop"
-	} else {
+	default:
 		hint = "enter send · ctrl+j newline · pgup/pgdn scroll · /help commands · ctrl+c quit"
 	}
 
