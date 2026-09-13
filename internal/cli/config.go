@@ -351,7 +351,7 @@ api_key_env = "GROQ_API_KEY"
 # model     = "llama-3.3-70b-versatile"
 
 [providers.gemini]
-base_url    = "https://generativelanguage.googleapis.com/v1beta"
+base_url    = "https://generativelanguage.googleapis.com/v1beta/openai"
 api_key_env = "GEMINI_API_KEY"
 # model     = "gemini-2.0-flash"
 

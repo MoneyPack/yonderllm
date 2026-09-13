@@ -89,7 +89,7 @@ func defaults() Config {
 				APIKeyEnv: "GROQ_API_KEY",
 			},
 			"gemini": {
-				BaseURL:   "https://generativelanguage.googleapis.com/v1beta",
+				BaseURL:   "https://generativelanguage.googleapis.com/v1beta/openai",
 				APIKeyEnv: "GEMINI_API_KEY",
 			},
 			"openrouter": {

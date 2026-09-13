@@ -246,7 +246,7 @@ none of them is asked for a card by yonderllm.
 | Provider | Environment variable | Base URL | Suggested model |
 | --- | --- | --- | --- |
 | `groq` *(default)* | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
-| `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta` | `gemini-2.0-flash` |
+| `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash` |
 | `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `meta-llama/llama-3.3-70b-instruct:free` |
 | `surplus` | `SURPLUS_API_KEY` | `https://api.surplusintelligence.ai/v1` | `gpt-5.6-sol` |
 
@@ -334,7 +334,7 @@ api_key_env = "GROQ_API_KEY"
 model       = "llama-3.3-70b-versatile"
 
 [providers.gemini]
-base_url    = "https://generativelanguage.googleapis.com/v1beta"
+base_url    = "https://generativelanguage.googleapis.com/v1beta/openai"
 api_key_env = "GEMINI_API_KEY"
 model       = "gemini-2.0-flash"
 

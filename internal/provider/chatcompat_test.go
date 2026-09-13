@@ -733,3 +733,57 @@ func TestFinishReasonVocabulary(t *testing.T) {
 		}
 	}
 }
+
+// TestBaseURLKeepsItsPathSegments pins the composition Gemini depends on: its
+// base URL already carries a version path, so requests must land on
+// <base>/chat/completions rather than at the server root. A trailing slash on
+// the configured base must not double up on the way either.
+func TestBaseURLKeepsItsPathSegments(t *testing.T) {
+	const prefix = "/v1beta/openai"
+	cases := []struct {
+		name string
+		base string
+	}{
+		{"bare", prefix},
+		{"trailing slash", prefix + "/"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var paths []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				switch r.URL.Path {
+				case prefix + "/chat/completions":
+					w.Header().Set("Content-Type", "text/event-stream")
+					io.WriteString(w, frame(`{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`))
+					io.WriteString(w, "data: [DONE]\n\n")
+				case prefix + "/models":
+					io.WriteString(w, `{"data":[{"id":"gemini-2.0-flash","context_length":1048576}]}`)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			p := NewChatCompat("stub", srv.URL+c.base, "k", WithHTTPClient(srv.Client()))
+			text, _, err := collect(p.Stream(context.Background(), Request{Model: "gemini-2.0-flash"}))
+			if err != nil {
+				t.Fatalf("Stream failed: %v", err)
+			}
+			if text != "hi" {
+				t.Errorf("text = %q, want %q", text, "hi")
+			}
+			models, err := p.Models(context.Background())
+			if err != nil {
+				t.Fatalf("Models failed: %v", err)
+			}
+			if len(models) != 1 || models[0].ID != "gemini-2.0-flash" {
+				t.Errorf("models = %+v, want the single catalogue entry", models)
+			}
+			want := []string{prefix + "/chat/completions", prefix + "/models"}
+			if !slices.Equal(paths, want) {
+				t.Errorf("requested paths = %v, want %v", paths, want)
+			}
+		})
+	}
+}
