@@ -67,7 +67,11 @@ func (p *ChatCompat) Name() string { return p.name }
 // pointers or carry omitempty, because some servers reject an explicit null
 // where they would accept an absent key.
 type chatRequest struct {
-	Model       string        `json:"model"`
+	// Model carries omitempty as a last line of defence: the session refuses
+	// to call a provider with no model configured, so an empty value here
+	// means a bug. Sending no key at all lets the server answer with its own
+	// complaint rather than hunting for a model literally named "".
+	Model       string        `json:"model,omitempty"`
 	Messages    []wireMessage `json:"messages"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`

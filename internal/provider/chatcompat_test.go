@@ -787,3 +787,45 @@ func TestBaseURLKeepsItsPathSegments(t *testing.T) {
 		})
 	}
 }
+
+// TestEmptyModelIsAbsentFromTheBody guards the last line of defence. The
+// session refuses to call a provider with no model configured, so an empty
+// model reaching the adapter is a bug — but if one ever does, the key must be
+// missing rather than sent as "", which reads to a server as a request for a
+// model whose name is the empty string. The assertion works on the raw body
+// because decoding into chatRequest cannot tell an absent key from an empty
+// one.
+func TestEmptyModelIsAbsentFromTheBody(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("request body is not valid JSON: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, frame(`{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`))
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	if _, _, err := collect(p.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})); err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	if _, ok := body["model"]; ok {
+		t.Errorf("body carries model = %#v, want the key omitted", body["model"])
+	}
+	// A model that was set must still travel, or omitempty has gone too far.
+	body = nil
+	if _, _, err := collect(p.Stream(context.Background(), Request{
+		Model:    "tiny",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})); err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	if got := body["model"]; got != "tiny" {
+		t.Errorf("body model = %#v, want %q", got, "tiny")
+	}
+}
