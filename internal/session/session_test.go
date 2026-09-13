@@ -192,6 +192,29 @@ func TestAskFallsBackOnAuth(t *testing.T) {
 	}
 }
 
+func TestAskFallsBackWhenProviderIsUnavailable(t *testing.T) {
+	first := &fakeProvider{name: "groq", err: &provider.UnavailableError{Provider: "groq", Status: 503}}
+	second := &fakeProvider{name: "gemini", chunks: textChunks("ok")}
+	s := New(testConfig("groq", "gemini"), resolverFor(first, second))
+
+	deltas, notices, done, err := collect(s.Ask(context.Background(), "hi"))
+	if err != nil {
+		t.Fatalf("Ask returned error: %v", err)
+	}
+	if !done {
+		t.Error("no Done event was emitted")
+	}
+	if got := strings.Join(deltas, ""); got != "ok" {
+		t.Errorf("reply = %q, want %q", got, "ok")
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "gemini") {
+		t.Errorf("notices = %v, want one mentioning gemini", notices)
+	}
+	if first.calls != 1 || second.calls != 1 {
+		t.Errorf("calls: groq=%d gemini=%d, want 1 and 1", first.calls, second.calls)
+	}
+}
+
 func TestAskAbortsOnNonRecoverableError(t *testing.T) {
 	boom := errors.New("connection reset")
 	first := &fakeProvider{name: "groq", err: boom}

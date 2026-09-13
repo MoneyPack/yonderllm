@@ -520,6 +520,15 @@ func (p *ChatCompat) statusError(resp *http.Response) error {
 	if message == "" {
 		message = strings.TrimSpace(resp.Status)
 	}
+
+	// A 5xx is the provider's own fault, not the request's, so the next
+	// provider in the chain is worth trying. A 4xx we have not named above is
+	// a bad request, and every provider would reject it the same way, so it
+	// stays an untyped error that ends the turn.
+	if resp.StatusCode >= 500 {
+		return &UnavailableError{Provider: p.name, Status: resp.StatusCode, Reason: message}
+	}
+
 	return fmt.Errorf("%s: %s (HTTP %d)", p.name, message, resp.StatusCode)
 }
 

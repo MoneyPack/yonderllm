@@ -351,10 +351,11 @@ func (s *Session) round(ctx context.Context, candidates []string, tools []provid
 		case errors.Is(err, errStopped):
 			return res, err
 
-		case errors.Is(err, provider.ErrQuota), errors.Is(err, provider.ErrAuth), errors.Is(err, provider.ErrNoModel):
+		case errors.Is(err, provider.ErrQuota), errors.Is(err, provider.ErrAuth), errors.Is(err, provider.ErrNoModel), errors.Is(err, provider.ErrUnavailable):
 			// This provider cannot answer, but the next one may: an exhausted
-			// allowance, a credential it will not accept, or no model to ask
-			// for are all faults of one provider rather than of the request.
+			// allowance, a credential it will not accept, no model to ask for,
+			// or a backend that is down are all faults of one provider rather
+			// than of the request.
 			errs = append(errs, err)
 
 		default:

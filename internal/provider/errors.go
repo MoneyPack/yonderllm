@@ -21,6 +21,12 @@ var ErrAuth = errors.New("provider authentication failed")
 // the next one in the chain should get the turn.
 var ErrNoModel = errors.New("provider has no model configured")
 
+// ErrUnavailable signals that a provider failed on its own side: an overloaded
+// backend, a gateway that lost its upstream, a deploy in progress. The request
+// itself was acceptable, so another provider stands a real chance of answering
+// it, and the core falls back rather than abandoning the turn.
+var ErrUnavailable = errors.New("provider unavailable")
+
 // QuotaError carries the retry hint some providers return alongside a 429.
 type QuotaError struct {
 	// Provider is the adapter that produced the error.
@@ -78,3 +84,23 @@ func (e *NoModelError) Error() string {
 
 // Unwrap lets errors.Is(err, ErrNoModel) match a *NoModelError.
 func (e *NoModelError) Unwrap() error { return ErrNoModel }
+
+// UnavailableError records which provider failed on its own side, and with what
+// status, so a fallback notice can name the backend that was down.
+type UnavailableError struct {
+	Provider string
+	// Status is the HTTP status code the provider returned.
+	Status int
+	// Reason is the provider's message, already stripped of any echoed key.
+	Reason string
+}
+
+func (e *UnavailableError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("%s: unavailable: %s (HTTP %d)", e.Provider, e.Reason, e.Status)
+	}
+	return fmt.Sprintf("%s: unavailable (HTTP %d)", e.Provider, e.Status)
+}
+
+// Unwrap lets errors.Is(err, ErrUnavailable) match an *UnavailableError.
+func (e *UnavailableError) Unwrap() error { return ErrUnavailable }

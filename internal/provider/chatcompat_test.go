@@ -251,21 +251,72 @@ func TestStreamAuthErrorRedactsEchoedKey(t *testing.T) {
 
 func TestStreamOtherStatusIsPlainError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		io.WriteString(w, `{"error":{"message":"upstream exploded"}}`)
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":{"message":"malformed request"}}`)
 	}))
 	defer srv.Close()
 
 	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
 	_, _, err := collect(p.Stream(context.Background(), Request{Model: "tiny"}))
 	if err == nil {
-		t.Fatal("a 500 produced no error")
+		t.Fatal("a 400 produced no error")
 	}
-	if errors.Is(err, ErrQuota) || errors.Is(err, ErrAuth) {
-		t.Errorf("a 500 was classified as quota or auth: %v", err)
+	// Every provider would reject a bad request the same way, so a 400 carries
+	// none of the sentinels that would send the session to the next provider.
+	if errors.Is(err, ErrQuota) || errors.Is(err, ErrAuth) || errors.Is(err, ErrUnavailable) {
+		t.Errorf("a 400 was classified as recoverable: %v", err)
+	}
+	if !strings.Contains(err.Error(), "malformed request") {
+		t.Errorf("error %q does not relay the server message", err.Error())
+	}
+}
+
+func TestStreamServerErrorIsUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		io.WriteString(w, `{"error":{"message":"upstream exploded"}}`)
+	}))
+	defer srv.Close()
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	_, _, err := collect(p.Stream(context.Background(), Request{Model: "tiny"}))
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want an unavailable error", err)
+	}
+
+	var ue *UnavailableError
+	if !errors.As(err, &ue) {
+		t.Fatalf("error %v is not an *UnavailableError", err)
+	}
+	if ue.Provider != "stub" {
+		t.Errorf("provider = %q, want %q", ue.Provider, "stub")
+	}
+	if ue.Status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", ue.Status, http.StatusServiceUnavailable)
+	}
+	if ue.Reason != "upstream exploded" {
+		t.Errorf("reason = %q, want %q", ue.Reason, "upstream exploded")
 	}
 	if !strings.Contains(err.Error(), "upstream exploded") {
 		t.Errorf("error %q does not relay the server message", err.Error())
+	}
+}
+
+func TestStreamServerErrorWithoutBodyStillSaysUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	p := NewChatCompat("stub", srv.URL, "k", WithHTTPClient(srv.Client()))
+	_, _, err := collect(p.Stream(context.Background(), Request{Model: "tiny"}))
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want an unavailable error", err)
+	}
+	// With no message to relay the status line stands in for one, so the error
+	// still names what went wrong rather than trailing an empty reason.
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("error %q does not mention the status code", err.Error())
 	}
 }
 
