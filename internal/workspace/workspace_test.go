@@ -796,3 +796,109 @@ func TestIsBinaryLooksOnlyAtTheStartOfAFile(t *testing.T) {
 		t.Error("an empty file was called binary")
 	}
 }
+
+func TestSearchSkipsAFileLargerThanTheLimit(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "big.txt", strings.Repeat("needle\n", maxFileBytes/7+1))
+	write(t, dir, "small.txt", "needle here\n")
+
+	matches, err := w.Search("needle")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Search found %d matches, want only the small file", len(matches))
+	}
+	if matches[0].Path != "small.txt" {
+		t.Errorf("Search matched %q, want small.txt", matches[0].Path)
+	}
+}
+
+func TestSearchReportsNestedPathsWithForwardSlashes(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "one/two/three.txt", "needle\n")
+
+	matches, err := w.Search("needle")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Search found %d matches, want 1", len(matches))
+	}
+	if matches[0].Path != "one/two/three.txt" {
+		t.Errorf("Search reported %q, want one/two/three.txt", matches[0].Path)
+	}
+}
+
+func TestSearchStopsAtTheMatchLimitInsideOneFile(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "many.txt", strings.Repeat("needle\n", maxMatches+50))
+
+	matches, err := w.Search("needle")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != maxMatches {
+		t.Fatalf("Search returned %d matches, want the limit of %d", len(matches), maxMatches)
+	}
+	if last := matches[len(matches)-1].Line; last != maxMatches {
+		t.Errorf("the last match is on line %d, want line %d", last, maxMatches)
+	}
+}
+
+func TestSearchTruncatesAnOverlongLineByBytes(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	line := "needle." + strings.Repeat("é", maxLineBytes)
+	write(t, dir, "wide.txt", line+"\n")
+
+	matches, err := w.Search("needle")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Search found %d matches, want 1", len(matches))
+	}
+	want := line[:maxLineBytes] + "..."
+	if matches[0].Text != want {
+		t.Errorf("match text is %q, want %q", matches[0].Text, want)
+	}
+	if !strings.HasPrefix(matches[0].Text[maxLineBytes-1:], "\xc3") {
+		t.Errorf("the cut did not land inside a multi-byte rune: %q", matches[0].Text)
+	}
+}
+
+func TestReadFileAcceptsAnInteriorParentThatStaysInside(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "sub/keep.txt", "kept\n")
+	write(t, dir, "file.txt", "inside\n")
+
+	got, err := w.ReadFile("sub/../file.txt")
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if string(got) != "inside\n" {
+		t.Errorf("ReadFile returned %q, want %q", string(got), "inside\n")
+	}
+}
+
+func TestReadFileReportsAMissingFileAsErrNotExist(t *testing.T) {
+	w, _ := open(t, perm.Code)
+
+	if _, err := w.ReadFile("absent.txt"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing file reported %v, want it to match os.ErrNotExist", err)
+	}
+}
+
+func TestReadFileAcceptsANULJustPastTheSniffedPrefix(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	want := strings.Repeat("a", sniffBytes) + "\x00"
+	write(t, dir, "late.bin", want)
+
+	got, err := w.ReadFile("late.bin")
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if string(got) != want {
+		t.Errorf("ReadFile returned %d bytes, want %d", len(got), len(want))
+	}
+}
