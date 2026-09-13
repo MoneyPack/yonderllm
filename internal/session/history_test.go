@@ -197,12 +197,79 @@ func TestRedactable(t *testing.T) {
 		name string
 		in   string
 		want string
+		// leak is the substring that must not survive. Empty means the case
+		// carries no credential and is here to prove nothing was removed.
+		leak string
 	}{
-		{"no credential", "just a prompt", "just a prompt"},
-		{"token mid-string", "curl -H 'Bearer sk-secret' url", "curl -H 'Bearer [redacted]' url"},
-		{"token at end", "use Bearer sk-secret", "use Bearer [redacted]"},
-		{"token before newline", "Bearer sk-secret\nnext line", "Bearer [redacted]\nnext line"},
-		{"bare marker", "Bearer ", "Bearer [redacted]"},
+		{name: "no credential", in: "just a prompt", want: "just a prompt"},
+		{
+			name: "token mid-string",
+			in:   "curl -H 'Bearer sk-secret' url",
+			want: "curl -H 'Bearer [redacted]' url",
+			leak: "sk-secret",
+		},
+		{
+			name: "token at end",
+			in:   "use Bearer sk-secret",
+			want: "use Bearer [redacted]",
+			leak: "sk-secret",
+		},
+		{
+			name: "token before newline",
+			in:   "Bearer sk-secret\nnext line",
+			want: "Bearer [redacted]\nnext line",
+			leak: "sk-secret",
+		},
+		{name: "bare marker", in: "Bearer ", want: "Bearer [redacted]"},
+		{
+			name: "vendor key alone",
+			in:   "sk-0123456789abcdef",
+			want: "[redacted]",
+			leak: "sk-0123456789abcdef",
+		},
+		{
+			name: "vendor key in a sentence",
+			in:   "is gsk_0123456789abcdef still valid?",
+			want: "is [redacted] still valid?",
+			leak: "gsk_0123456789abcdef",
+		},
+		{
+			name: "env assignment",
+			in:   "GROQ_API_KEY=gsk_0123456789abcdef",
+			want: "GROQ_API_KEY=[redacted]",
+			leak: "gsk_0123456789abcdef",
+		},
+		{
+			name: "quoted env assignment",
+			in:   `GEMINI_API_KEY="averysecretvalue"`,
+			want: `GEMINI_API_KEY="[redacted]"`,
+			leak: "averysecretvalue",
+		},
+		{
+			name: "layout is preserved byte for byte",
+			in:   "# .env\n\n\tOPENROUTER_API_KEY=or-0123456789abcdef\n",
+			want: "# .env\n\n\tOPENROUTER_API_KEY=[redacted]\n",
+			leak: "or-0123456789abcdef",
+		},
+		// The rules below must not fire: guessing wrong here corrupts the
+		// question the user is asking.
+		{name: "short mention of a prefix", in: "sk-1 is too short", want: "sk-1 is too short"},
+		{name: "unrelated assignment", in: "PATH=/usr/local/bin", want: "PATH=/usr/local/bin"},
+		{
+			name: "commit hash",
+			in:   "revert 9f4a1c2d3e5b6a7f8c9d0e1f2a3b4c5d6e7f8a9b",
+			want: "revert 9f4a1c2d3e5b6a7f8c9d0e1f2a3b4c5d6e7f8a9b",
+		},
+		{
+			name: "uuid",
+			in:   "row 123e4567-e89b-12d3-a456-426614174000 is missing",
+			want: "row 123e4567-e89b-12d3-a456-426614174000 is missing",
+		},
+		{
+			name: "long identifier",
+			in:   "rename configurationManagerFactoryProvider",
+			want: "rename configurationManagerFactoryProvider",
+		},
 	}
 
 	for _, c := range cases {
@@ -211,10 +278,68 @@ func TestRedactable(t *testing.T) {
 			if got != c.want {
 				t.Errorf("redactable(%q) = %q, want %q", c.in, got, c.want)
 			}
-			if strings.Contains(got, "sk-secret") {
+			if c.leak != "" && strings.Contains(got, c.leak) {
 				t.Errorf("redactable(%q) leaked the credential: %q", c.in, got)
 			}
 		})
+	}
+}
+
+// outboundText collects everything a request would carry: message content plus
+// the arguments of every tool call, which travel to the provider as well.
+func outboundText(msgs []provider.Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		b.WriteString(m.Content)
+		b.WriteByte('\n')
+		for _, c := range m.ToolCalls {
+			b.WriteString(c.Arguments)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func TestOutboundMessagesDropSecrets(t *testing.T) {
+	const secret = "gsk_0123456789abcdef"
+
+	var h History
+	h.SetSystem("you are helpful")
+	h.Append(provider.RoleUser, "put GROQ_API_KEY="+secret+" in .env")
+	h.AppendToolCalls("writing it now", []provider.ToolCall{{
+		ID:        "call-1",
+		Name:      "write_file",
+		Arguments: `{"path":".env","body":"GROQ_API_KEY=` + secret + `"}`,
+	}})
+	h.AppendToolResult("call-1", "wrote .env")
+
+	// Redaction happens before trimming, so every budget is covered.
+	for _, budget := range []int{0, 40, 12} {
+		if got := outboundText(h.Prompt(budget)); strings.Contains(got, secret) {
+			t.Errorf("Prompt(%d) leaked the credential:\n%s", budget, got)
+		}
+	}
+	if got := outboundText(h.Messages()); strings.Contains(got, secret) {
+		t.Errorf("Messages leaked the credential:\n%s", got)
+	}
+
+	// The tool call keeps its shape around the removed value.
+	msgs := h.Messages()
+	call := msgs[2].ToolCalls[0]
+	if want := `{"path":".env","body":"GROQ_API_KEY=[redacted]"}`; call.Arguments != want {
+		t.Errorf("tool arguments = %q, want %q", call.Arguments, want)
+	}
+	if call.ID != "call-1" || call.Name != "write_file" {
+		t.Errorf("redaction disturbed the call: %+v", call)
+	}
+
+	// Local history is untouched: the transcript still shows what was typed.
+	turns := h.Turns()
+	if !strings.Contains(turns[0].Content, secret) {
+		t.Errorf("stored turn was redacted: %q", turns[0].Content)
+	}
+	if !strings.Contains(turns[1].ToolCalls[0].Arguments, secret) {
+		t.Errorf("stored tool arguments were redacted: %q", turns[1].ToolCalls[0].Arguments)
 	}
 }
 
