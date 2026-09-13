@@ -47,6 +47,7 @@ type env struct {
 	mode       string
 	maxTokens  int
 	dailyCap   int
+	yes        bool
 }
 
 // resolve loads configuration and overlays the global flags.
@@ -97,8 +98,18 @@ func (e *env) resolve() (config.Config, error) {
 
 	// The mode string reaches perm eventually; rejecting it here means an
 	// invalid --mode fails before a request is spent.
-	if _, err := perm.ParseMode(cfg.Mode); err != nil {
+	mode, err := perm.ParseMode(cfg.Mode)
+	if err != nil {
 		return config.Config{}, err
+	}
+
+	// --yes relaxes what agent mode would stop to ask about. It is refused
+	// in the other modes rather than ignored: chat and code have limits that
+	// are not up for negotiation, and a script that asked to skip approvals
+	// should be told its request meant nothing rather than left believing
+	// it was honoured. Refusing here spends no request.
+	if e.yes && mode != perm.Agent {
+		return config.Config{}, fmt.Errorf("--yes is only accepted in agent mode, and this run is in %s mode", mode)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -141,6 +152,7 @@ func newRoot(e *env) *cobra.Command {
 	flags.StringVar(&e.mode, "mode", "", "permission mode: chat, code, or agent")
 	flags.IntVar(&e.maxTokens, "max-tokens", 0, "cap on output tokens per request")
 	flags.IntVar(&e.dailyCap, "daily-cap", -1, "cap on requests per day (0 disables the cap)")
+	flags.BoolVar(&e.yes, "yes", false, "accept agent mode's writes and commands in advance (agent mode only)")
 
 	root.SetIn(e.in)
 	root.SetOut(e.out)

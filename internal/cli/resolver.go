@@ -95,8 +95,9 @@ func (e *env) newSession() (*session.Session, error) {
 	// a pipe, a subcommand that prints and exits — where there is nobody to
 	// put the question to. Capabilities the mode gates behind an approval
 	// are withheld from the model entirely rather than offered and then
-	// always refused.
-	return newSessionFor(cfg, mode, nil), nil
+	// always refused. --yes is what lets such a run use them anyway: it
+	// answers in advance, so there is nothing left to ask.
+	return e.newSessionFor(cfg, mode, nil), nil
 }
 
 // newSessionFor builds a conversation from an already-resolved configuration
@@ -113,8 +114,20 @@ func (e *env) newSession() (*session.Session, error) {
 // one, the capability never reaches the model. Passing it in rather than
 // deciding here keeps the question of *who can be asked* with the caller that
 // owns an interface, which is the only code able to answer it.
-func newSessionFor(cfg config.Config, mode perm.Mode, approver tools.Approver) *session.Session {
+//
+// It is a method because the policy depends on --yes, which lives on the
+// environment. The flag is read here, at the single statement that decides what
+// a session may touch, rather than at either call site: an answer given in
+// advance is still an answer, and both interfaces should honour it the same way.
+func (e *env) newSessionFor(cfg config.Config, mode perm.Mode, approver tools.Approver) *session.Session {
+	// resolve has already refused --yes outside agent mode, so this cannot
+	// hand auto-approval to chat or code.
+	policy := perm.New(mode)
+	if e.yes {
+		policy = perm.NewAutoApprove(mode)
+	}
+
 	sess := session.New(cfg, newResolver(cfg))
-	sess.SetTools(tools.For(perm.New(mode), approver)...)
+	sess.SetTools(tools.For(policy, approver)...)
 	return sess
 }

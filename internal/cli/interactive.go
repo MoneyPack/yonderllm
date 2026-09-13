@@ -44,7 +44,7 @@ func (e *env) runTUI() error {
 	approvals := tui.NewApprovals()
 
 	return tui.Run(tui.Options{
-		Session:   newSessionFor(cfg, mode, approvals.Ask),
+		Session:   e.newSessionFor(cfg, mode, approvals.Ask),
 		Mode:      mode,
 		Approvals: approvals,
 		In:        e.in,
