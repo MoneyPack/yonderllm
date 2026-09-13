@@ -233,6 +233,11 @@ func TestDestructive(t *testing.T) {
 		{args: []string{"go", "clean", "-cache"}, want: true},
 		{args: []string{"tidy", "--force"}, want: true},
 		{args: []string{"gzip", "-f", "notes.txt"}, want: true},
+		{args: []string{"tool", "-force"}, want: true},
+		{args: []string{"tool", "/f"}, want: true},
+		{args: []string{"tool", "--delete"}, want: true},
+		{args: []string{"tool", "-delete"}, want: true},
+		{args: []string{"tool", "--no-preserve-root"}, want: true},
 	}
 	for _, test := range tests {
 		if got := Destructive(test.args); got != test.want {
@@ -282,7 +287,15 @@ func TestCurrentUsesTheWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Current: %v", err)
 	}
-	if r.Dir() == "" {
-		t.Error("the runner reports no directory, want the one the user started in")
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		want = dir
+	}
+	got, err := filepath.EvalSymlinks(r.Dir())
+	if err != nil {
+		got = r.Dir()
+	}
+	if got != want {
+		t.Errorf("the runner reports %s, want the directory the user started in, %s", got, want)
 	}
 }
