@@ -7,6 +7,7 @@
 package session
 
 import (
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -106,6 +107,9 @@ func (h *History) AppendToolResult(id, content string) {
 func (h *History) Turns() []provider.Message {
 	out := make([]provider.Message, len(h.turns))
 	copy(out, h.turns)
+	for i := range out {
+		out[i].ToolCalls = slices.Clone(out[i].ToolCalls)
+	}
 	return out
 }
 
@@ -125,7 +129,7 @@ func (h *History) Messages() []provider.Message {
 
 // messages assembles the conversation verbatim, before redaction.
 func (h *History) messages() []provider.Message {
-	var out []provider.Message
+	out := make([]provider.Message, 0, len(h.turns)+1)
 	if h.system != "" {
 		out = append(out, provider.Message{Role: provider.RoleSystem, Content: h.system})
 	}
@@ -220,7 +224,15 @@ func redactable(s string) string {
 	}
 
 	var b strings.Builder
-	b.Grow(len(s))
+	written := 0
+	replace := func(start, end int, value string) {
+		if b.Cap() == 0 {
+			b.Grow(len(s))
+		}
+		b.WriteString(s[written:start])
+		b.WriteString(value)
+		written = end
+	}
 
 	// Set once an assignment has named a secret but its value has not been
 	// reached yet, which happens when the value is quoted: KEY="..." puts a
@@ -229,15 +241,14 @@ func redactable(s string) string {
 
 	for i := 0; i < len(s); {
 		if n := bearerAt(s, i); n > 0 {
-			b.WriteString(s[i : i+n]) // keep the marker's own casing
-			b.WriteString(placeholder)
-			i = endOfToken(s, i+n)
+			end := endOfToken(s, i+n)
+			replace(i+n, end, placeholder)
+			i = end
 			valueIsSecret = false
 			continue
 		}
 
 		if isTokenEnd(s[i]) {
-			b.WriteByte(s[i])
 			// Only a quote may stand between a secret's name and its value.
 			// Anything else means the value never arrived.
 			if !isQuote(s[i]) {
@@ -249,16 +260,22 @@ func redactable(s string) string {
 
 		end := endOfToken(s, i)
 		if valueIsSecret {
-			b.WriteString(placeholder)
+			replace(i, end, placeholder)
 			valueIsSecret = false
 		} else {
 			text, expectValue := redactToken(s[i:end])
-			b.WriteString(text)
+			if text != s[i:end] {
+				replace(i, end, text)
+			}
 			valueIsSecret = expectValue
 		}
 		i = end
 	}
 
+	if written == 0 {
+		return s
+	}
+	b.WriteString(s[written:])
 	return b.String()
 }
 
