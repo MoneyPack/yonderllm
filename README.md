@@ -365,6 +365,23 @@ daily request cap reached (200/200), resets at 00:00
 It exists because free tiers punish enthusiasm quietly and cheap tiers bill it.
 `/usage` in the TUI shows where you stand.
 
+The request count is shared across CLI invocations and TUI sessions on this
+machine and resets at local midnight. It is stored in `yonderllm/usage.json`
+under the OS user cache directory (`%LOCALAPPDATA%` on Windows,
+`$XDG_CACHE_HOME` or `~/.cache` on Linux, `~/Library/Caches` on macOS).
+Concurrent processes lock the counter before reserving a request. The count is
+saved before dispatch, so a process crash can leave a reservation charged.
+One exchange, including fallback attempts and tool rounds, uses one reservation.
+Token totals and provider breakdowns remain per session.
+
+If the counter cannot be read, locked, or saved, the request fails before
+contacting a provider rather than silently resetting the allowance. Fix the
+reported path or permissions; removing `usage.json` deliberately resets the
+count. Clearing the OS cache also resets it. This is a local request limit,
+not a provider quota or a guaranteed spending limit. Different processes use
+their own configured cap against the same count; a cap of `0` disables the
+limit but still records requests.
+
 ---
 
 ## The TUI
@@ -460,7 +477,7 @@ are withheld, which turns the ceiling into a prose answer instead of a
 truncation — the model is asked to conclude with what it has rather than cut
 off mid-investigation.
 
-Each round is one request against the daily cap, and token usage accumulates
+The whole exchange uses one reservation against the daily cap, and token usage accumulates
 across the whole turn so the footer reports the true cost of the answer, not
 just its final leg.
 

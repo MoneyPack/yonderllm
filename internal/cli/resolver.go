@@ -97,7 +97,7 @@ func (e *env) newSession() (*session.Session, error) {
 	// are withheld from the model entirely rather than offered and then
 	// always refused. --yes is what lets such a run use them anyway: it
 	// answers in advance, so there is nothing left to ask.
-	return e.newSessionFor(cfg, mode, nil), nil
+	return e.newSessionFor(cfg, mode, nil)
 }
 
 // newSessionFor builds a conversation from an already-resolved configuration
@@ -119,7 +119,7 @@ func (e *env) newSession() (*session.Session, error) {
 // environment. The flag is read here, at the single statement that decides what
 // a session may touch, rather than at either call site: an answer given in
 // advance is still an answer, and both interfaces should honour it the same way.
-func (e *env) newSessionFor(cfg config.Config, mode perm.Mode, approver tools.Approver) *session.Session {
+func (e *env) newSessionFor(cfg config.Config, mode perm.Mode, approver tools.Approver) (*session.Session, error) {
 	// resolve has already refused --yes outside agent mode, so this cannot
 	// hand auto-approval to chat or code.
 	policy := perm.New(mode)
@@ -127,7 +127,12 @@ func (e *env) newSessionFor(cfg config.Config, mode perm.Mode, approver tools.Ap
 		policy = perm.NewAutoApprove(mode)
 	}
 
+	path, err := session.DefaultUsagePath()
+	if err != nil {
+		return nil, fmt.Errorf("locate daily usage storage: %w", err)
+	}
 	sess := session.New(cfg, newResolver(cfg))
+	sess.SetUsage(session.NewPersistentUsage(cfg.DailyCap, path))
 	sess.SetTools(tools.For(policy, approver)...)
-	return sess
+	return sess, nil
 }

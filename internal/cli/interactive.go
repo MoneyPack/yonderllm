@@ -42,9 +42,13 @@ func (e *env) runTUI() error {
 	// place that knows a human is at the keyboard — is what turns perm.Ask
 	// from a withheld capability into a real prompt.
 	approvals := tui.NewApprovals()
+	sess, err := e.newSessionFor(cfg, mode, approvals.Ask)
+	if err != nil {
+		return err
+	}
 
 	return tui.Run(tui.Options{
-		Session:   e.newSessionFor(cfg, mode, approvals.Ask),
+		Session:   sess,
 		Mode:      mode,
 		Approvals: approvals,
 		In:        e.in,

@@ -114,6 +114,10 @@ func (s *Session) History() *History { return &s.history }
 // Usage exposes the counters backing /usage.
 func (s *Session) Usage() *Usage { return s.usage }
 
+// SetUsage attaches a counter before the first Ask. The CLI supplies a shared
+// persistent counter; New otherwise keeps library sessions in memory.
+func (s *Session) SetUsage(u *Usage) { s.usage = u }
+
 // Provider reports the provider that will be tried first.
 func (s *Session) Provider() string { return s.active }
 
@@ -244,8 +248,8 @@ func (s *Session) Ask(ctx context.Context, prompt string) iter.Seq2[Event, error
 
 		candidates := s.chain()
 		if len(candidates) == 0 {
-			s.usage.Release()
-			yield(Event{}, errors.New("no provider has a usable API key; set one of the provider key environment variables"))
+			err := errors.New("no provider has a usable API key; set one of the provider key environment variables")
+			yield(Event{}, errors.Join(err, s.usage.Release()))
 			return
 		}
 
@@ -275,8 +279,7 @@ func (s *Session) Ask(ctx context.Context, prompt string) iter.Seq2[Event, error
 				return
 
 			default:
-				s.usage.Release()
-				yield(Event{Provider: res.provider}, err)
+				yield(Event{Provider: res.provider}, errors.Join(err, s.usage.Release()))
 				return
 			}
 

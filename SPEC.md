@@ -145,6 +145,11 @@ writes must ask for them explicitly with `--yes`, which is accepted only in
 - Context is trimmed to fit the model window, oldest turns first.
 - Output tokens are capped per request.
 - A daily request cap plus a running usage counter, surfaced by `/usage`.
+  The daily request count is persisted in the user cache and shared across
+  processes using a locked read/modify/write transaction. Reservations are
+  saved before dispatch; storage errors refuse the request. The count rolls
+  over at local midnight; late refunds never reduce the new day's count.
+  Token totals remain session-local. Clearing the cache resets the local count.
 - On a quota or rate-limit error, fall back to the next configured provider
   automatically and note the switch in the transcript.
 

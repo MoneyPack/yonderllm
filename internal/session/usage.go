@@ -48,6 +48,13 @@ type Usage struct {
 	day      time.Time
 	requests int
 
+	// Persistent counters share the daily count at path. Token totals below
+	// always remain per-process. See usagestore.go.
+	path       string
+	persistent bool
+	// Refunds belong to this counter's reservations, never another process's.
+	reservations []string
+
 	byProvider map[string]*ProviderUsage
 }
 
@@ -93,6 +100,22 @@ func (u *Usage) rollover() {
 func (u *Usage) Reserve() error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.persistent {
+		err := u.transaction(func(state *usageState) error {
+			if u.cap > 0 && state.Requests >= u.cap {
+				return &CapError{Cap: u.cap, Requests: state.Requests, Resets: u.day.AddDate(0, 0, 1)}
+			}
+			if state.Requests == int(^uint(0)>>1) {
+				return fmt.Errorf("daily usage request count overflow")
+			}
+			state.Requests++
+			return nil
+		})
+		if err == nil {
+			u.reservations = append(u.reservations, u.day.Format(time.DateOnly))
+		}
+		return err
+	}
 	u.rollover()
 
 	if u.cap > 0 && u.requests >= u.cap {
@@ -109,12 +132,30 @@ func (u *Usage) Reserve() error {
 // Release returns an unused reservation, for when a request fails before any
 // provider accepted it. Without it, a run of local failures would silently eat
 // the day's budget.
-func (u *Usage) Release() {
+func (u *Usage) Release() error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.persistent {
+		if len(u.reservations) == 0 {
+			return nil
+		}
+		i := len(u.reservations) - 1
+		day := u.reservations[i]
+		err := u.transaction(func(state *usageState) error {
+			if state.Day == day && state.Requests > 0 {
+				state.Requests--
+			}
+			return nil
+		})
+		if err == nil {
+			u.reservations = u.reservations[:i]
+		}
+		return err
+	}
 	if u.requests > 0 {
 		u.requests--
 	}
+	return nil
 }
 
 // Record adds the tokens a provider reported to that provider's totals.
@@ -136,6 +177,9 @@ func (u *Usage) Record(providerName string, usage provider.Usage) {
 func (u *Usage) Requests() int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.persistent {
+		_ = u.transaction(nil)
+	}
 	u.rollover()
 	return u.requests
 }
@@ -151,6 +195,9 @@ func (u *Usage) Cap() int {
 func (u *Usage) Remaining() int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if u.persistent {
+		_ = u.transaction(nil)
+	}
 	u.rollover()
 	if u.cap <= 0 {
 		return -1

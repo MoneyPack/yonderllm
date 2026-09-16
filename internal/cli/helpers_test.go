@@ -294,6 +294,12 @@ func scrubEnv(t *testing.T) {
 		t.Setenv(key, "")
 	}
 	t.Setenv(testKeyEnv, "test-key")
+	// Keep persistent counters away from the developer's real cache on all
+	// supported platforms. Calls within one test intentionally share it.
+	cache := t.TempDir()
+	t.Setenv("LOCALAPPDATA", cache)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("HOME", cache)
 }
 
 // newHarness scrubs the environment, writes a config that points groq at the
