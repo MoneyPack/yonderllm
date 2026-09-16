@@ -61,6 +61,12 @@ Three ways to drive the same core:
 
 `/model`, `/clear`, `/read`, `/search`, `/usage`, `/help`.
 
+`/mode [chat|code|agent]` reports or changes permissions while idle, rebuilding
+the tool set and header together without clearing history. A change uses
+per-call approval rather than carrying `--yes` into the new mode. Selecting the
+current mode is a no-op. Changes wait for cancelled workers to finish and never
+interrupt an approval question. Previously read context remains in history.
+
 `/save <name>` writes a named conversation snapshot. Interactive sessions
 autosave completed exchanges; `--no-save` disables autosave. `--resume <name>`
 and `--last` restore saved context in the TUI or before a headless prompt.

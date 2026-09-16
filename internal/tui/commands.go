@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"yonderllm/internal/perm"
+	"yonderllm/internal/tools"
 	"yonderllm/internal/workspace"
 )
 
@@ -27,6 +28,7 @@ const maxShownLines = 200
 // tools as well as the commands, because both are halves of the interface that
 // have nowhere else to be discovered.
 const helpText = `Commands
+  /mode [chat|code|agent] show or change the permission mode
   /model                 show the provider and model in use
   /model <model>         switch model on the current provider
   /model <provider>      switch provider, keeping its configured model
@@ -73,6 +75,8 @@ func (m model) runCommand(text string) (tea.Model, tea.Cmd) {
 		m.append(block{kind: blockInfo, text: m.usageReport()})
 	case "/model":
 		m.applyModel(args)
+	case "/mode":
+		m.applyMode(args)
 	case "/read":
 		m.readFile(remainder(text))
 	case "/search":
@@ -84,6 +88,49 @@ func (m model) runCommand(text string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// applyMode replaces the tools as well as the label. Tool closures capture
+// their policy, so updating the label alone would leave the old rights active.
+func (m *model) applyMode(args []string) {
+	if len(args) == 0 {
+		m.append(block{kind: blockInfo, text: "mode: " + m.mode.String()})
+		return
+	}
+	if len(args) != 1 {
+		m.append(block{kind: blockError, text: "usage: /mode [chat|code|agent]"})
+		return
+	}
+	mode, err := perm.ParseMode(args[0])
+	if err != nil {
+		m.append(block{kind: blockError, text: err.Error()})
+		return
+	}
+	if mode == m.mode {
+		m.append(block{kind: blockInfo, text: "mode: " + m.mode.String() + " (unchanged)"})
+		return
+	}
+	if m.busy || m.asking {
+		m.append(block{kind: blockNotice, text: "finish the current exchange before changing mode"})
+		return
+	}
+	// cancel returns control promptly, but the worker can still be unwinding.
+	// Do not replace session tools until its final access has completed.
+	if m.current.done != nil {
+		select {
+		case <-m.current.done:
+		default:
+			m.append(block{kind: blockNotice, text: "still stopping — retry /mode once the exchange has stopped"})
+			return
+		}
+	}
+	var approve tools.Approver
+	if m.approvals != nil {
+		approve = m.approvals.Ask
+	}
+	m.sess.SetTools(tools.For(perm.New(mode), approve)...)
+	m.mode = mode
+	m.append(block{kind: blockNotice, text: "mode is now " + mode.String() + "; writes and commands require approval where permitted"})
 }
 
 // saveConversation writes the current conversation to the on-disk store under

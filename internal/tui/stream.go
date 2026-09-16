@@ -49,15 +49,18 @@ type stream struct {
 	seq    int
 	ch     chan streamPacket
 	cancel context.CancelFunc
+	done   <-chan struct{}
 }
 
 // startStream begins an exchange and returns the handle used to read it.
 func startStream(sess *session.Session, seq int, prompt string) stream {
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan streamPacket, streamBuffer)
+	done := make(chan struct{})
 
 	go func() {
 		defer close(ch)
+		defer close(done)
 
 		for event, err := range sess.Ask(ctx, prompt) {
 			// Guarding the send against cancellation is what lets
@@ -72,7 +75,7 @@ func startStream(sess *session.Session, seq int, prompt string) stream {
 		}
 	}()
 
-	return stream{seq: seq, ch: ch, cancel: cancel}
+	return stream{seq: seq, ch: ch, cancel: cancel, done: done}
 }
 
 // waitForStream reads a single packet. Bubble Tea commands run once and are

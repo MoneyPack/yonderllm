@@ -467,6 +467,20 @@ runaway answer.
 
 Switching model with `/model` keeps the conversation. Only `/clear` discards it.
 
+`/mode` shows the current permission mode; `/mode chat`, `/mode code`, and
+`/mode agent` change it without restarting or losing conversation history.
+The header and the tools offered to the model change together. Chat removes
+all tools; code permits reading/searching and approved writes; agent also
+permits approved commands. Switching to a different mode resets approval
+behavior to per-action prompts, even if the session started with `--yes`.
+Selecting the current mode leaves its policy unchanged. Without an approval
+interface, operations requiring approval remain unavailable.
+
+Mode changes are accepted only while idle. During an answer, finish or cancel
+it first; if the cancelled worker is still stopping, retry `/mode` once it has
+stopped. An open approval question keeps control of the keyboard. Mode changes
+apply to future actions and do not remove previously read content from history.
+
 ---
 
 ## Tools
