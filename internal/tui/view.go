@@ -83,7 +83,13 @@ func (m model) footer() string {
 		// stop hint here would be a lie about what the terminal does.
 		hint = "y allow · anything else deny"
 	case m.busy:
-		hint = "answering… ctrl+c stop"
+		activity := m.activity
+		if activity == "" {
+			activity = "answering"
+		}
+		frames := []string{"·", "✦", "✧", "✦"}
+		frame := frames[m.spinner%len(frames)]
+		hint = fmt.Sprintf("%s %s… ctrl+c stop", frame, activity)
 	default:
 		hint = "enter send · ctrl+j newline · pgup/pgdn scroll · /help commands · ctrl+c quit"
 	}

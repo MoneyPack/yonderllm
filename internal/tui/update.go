@@ -23,6 +23,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamEventMsg:
 		return m.handleEvent(msg)
 
+	case activityTickMsg:
+		if !m.busy || msg.seq != m.seq {
+			return m, nil
+		}
+		m.spinner++
+		return m, waitForStream(m.current)
+
 	case streamClosedMsg:
 		// A close from a superseded stream says nothing about the
 		// exchange currently in flight, so it must not clear busy.
@@ -149,6 +156,7 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		// falling back to another provider — so busy stays set and the
 		// close message remains the single point that clears it.
 		m.append(block{kind: blockError, text: packet.err.Error()})
+		m.activity = "recovering"
 
 	case packet.event.Tool != nil:
 		// The provider is recorded first: committing the text written
@@ -157,6 +165,11 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 			m.answered = packet.event.Provider
 		}
 		m.tool(packet.event.Tool)
+		if packet.event.Tool.Finished {
+			m.activity = "streaming"
+		} else {
+			m.activity = "running " + packet.event.Tool.Name
+		}
 
 	case packet.event.Notice != "":
 		m.append(block{kind: blockNotice, text: packet.event.Notice})
@@ -165,6 +178,7 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		}
 
 	default:
+		m.activity = "streaming"
 		if packet.event.Provider != "" {
 			m.answered = packet.event.Provider
 		}
@@ -176,6 +190,8 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 	return m, waitForStream(m.current)
 }
+
+type activityTickMsg struct{ seq int }
 
 // forward hands a message to the focused child components.
 func (m model) forward(msg tea.Msg) (tea.Model, tea.Cmd) {
