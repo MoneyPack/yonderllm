@@ -67,6 +67,14 @@ per-call approval rather than carrying `--yes` into the new mode. Selecting the
 current mode is a no-op. Changes wait for cancelled workers to finish and never
 interrupt an approval question. Previously read context remains in history.
 
+`/retry` retries a failed/interrupted exchange after the worker stops, reusing
+existing messages without duplicating the user turn. Tools are withheld and
+unsolicited calls are not executed. Completed tool results remain context;
+unmatched tool calls prevent retry. A new daily-cap reservation is required.
+Completed answers with save failures are not retryable. Retry state is not
+persisted and is cleared by clear/load. Stream error envelopes are surfaced;
+unmarked EOF is a protocol interruption, and partial text prevents fallback.
+
 `/save <name>` writes a named conversation snapshot. Interactive sessions
 autosave completed exchanges; `--no-save` disables autosave. `--resume <name>`
 and `--last` restore saved context in the TUI or before a headless prompt.

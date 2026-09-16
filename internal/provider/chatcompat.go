@@ -141,6 +141,7 @@ type toolCallFragment struct {
 
 // chatChunk is one SSE frame of a streamed completion.
 type chatChunk struct {
+	Error   json.RawMessage `json:"error"`
 	Choices []struct {
 		Delta struct {
 			Content   string             `json:"content"`
@@ -296,8 +297,9 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 		calls := newToolCallBuffer()
+		finished := false
 		// flush emits whatever calls have been reassembled but not yet
-		// handed over. It runs when the stream ends without a finish
+		// handed over. It runs at an explicit [DONE] without a finish
 		// reason, which happens on servers that go straight from the last
 		// argument fragment to [DONE]; without it those calls would be
 		// collected and then dropped.
@@ -330,6 +332,18 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 				yield(Chunk{}, fmt.Errorf("%s: decoding stream frame: %w", p.name, err))
 				return
 			}
+			if len(frame.Error) > 0 && string(frame.Error) != "null" {
+				var detail struct {
+					Message string `json:"message"`
+				}
+				_ = json.Unmarshal(frame.Error, &detail)
+				message := redactKeyish(strings.TrimSpace(detail.Message))
+				if message == "" {
+					message = "provider reported an error in the response stream"
+				}
+				yield(Chunk{}, fmt.Errorf("%s: stream error: %s", p.name, message))
+				return
+			}
 
 			var chunk Chunk
 			if len(frame.Choices) > 0 {
@@ -345,6 +359,7 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 				// called it a plain stop, because the turn is not over
 				// for the caller: there are calls left to run.
 				if chunk.Finish != FinishNone {
+					finished = true
 					if pending := calls.take(); len(pending) > 0 {
 						chunk.ToolCalls = pending
 						chunk.Finish = FinishTool
@@ -371,7 +386,10 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 			yield(Chunk{}, fmt.Errorf("%s: reading stream: %w", p.name, err))
 			return
 		}
-		flush()
+		if !finished {
+			yield(Chunk{}, fmt.Errorf("%s: response stream ended before completion: %w", p.name, io.ErrUnexpectedEOF))
+			return
+		}
 	}
 }
 

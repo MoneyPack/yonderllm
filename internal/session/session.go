@@ -88,15 +88,16 @@ type Event struct {
 
 // Session is one conversation bound to a configuration and a provider chain.
 type Session struct {
-	store    *Sessions
-	saveName string
-	cfg      config.Config
-	resolve  Resolver
-	history  History
-	usage    *Usage
-	active   string
-	contexts map[string]int
-	tools    []Tool
+	retryPending bool
+	store        *Sessions
+	saveName     string
+	cfg          config.Config
+	resolve      Resolver
+	history      History
+	usage        *Usage
+	active       string
+	contexts     map[string]int
+	tools        []Tool
 }
 
 // New builds a session from resolved configuration.
@@ -148,6 +149,7 @@ func (s *Session) LoadConversation(conv SavedConversation) error {
 	s.active = conv.Provider
 	s.SetModel(conv.Model)
 	s.history = History{system: redactable(conv.System), turns: redactSavedMessages(conv.Messages)}
+	s.retryPending = false
 	return nil
 }
 
@@ -174,6 +176,7 @@ func (s *Session) Credentialed(name string) bool { return s.cfg.Credentialed(nam
 // Clear drops the conversation turns, keeping the system prompt and every
 // counter. /clear frees context, it does not refund the day's budget.
 func (s *Session) Clear() {
+	s.retryPending = false
 	s.history.Clear()
 	if s.store != nil {
 		s.saveName = fmt.Sprintf("session-%x", randomSessionID())
@@ -276,13 +279,44 @@ func (s *Session) chain() []string {
 // the user asked one question and the number of rounds is our decision, not
 // theirs.
 func (s *Session) Ask(ctx context.Context, prompt string) iter.Seq2[Event, error] {
+	return s.exchange(ctx, prompt, false)
+}
+
+// CanRetry is called only after the preceding exchange has stopped. Unknown
+// tool outcomes are never replayed or silently discarded.
+func (s *Session) CanRetry() error {
+	if !s.retryPending {
+		return errors.New("no failed or interrupted exchange to retry")
+	}
+	if err := validateMessages(s.history.Turns()); err != nil {
+		return fmt.Errorf("cannot retry: %w; review tool outcomes and start a new conversation", err)
+	}
+	return nil
+}
+
+// Retry reuses the failed turn without adding a duplicate user message. Tools
+// are withheld, including when a provider emits an unsolicited tool call.
+func (s *Session) Retry(ctx context.Context) iter.Seq2[Event, error] {
+	return s.exchange(ctx, "", true)
+}
+
+func (s *Session) exchange(ctx context.Context, prompt string, retry bool) iter.Seq2[Event, error] {
 	return func(yield func(Event, error) bool) {
+		if retry {
+			if err := s.CanRetry(); err != nil {
+				yield(Event{}, err)
+				return
+			}
+		}
 		if err := s.usage.Reserve(); err != nil {
 			yield(Event{}, err)
 			return
 		}
 
-		s.history.Append(provider.RoleUser, prompt)
+		s.retryPending = true
+		if !retry {
+			s.history.Append(provider.RoleUser, prompt)
+		}
 
 		candidates := s.chain()
 		if len(candidates) == 0 {
@@ -302,7 +336,7 @@ func (s *Session) Ask(ctx context.Context, prompt string) iter.Seq2[Event, error
 			// bound into a nudge rather than a wall: the model can no
 			// longer ask for anything, so it answers.
 			var tools []provider.Tool
-			last := round == maxToolRounds-1
+			last := retry || round == maxToolRounds-1
 			if !last {
 				tools = s.definitions()
 			}
@@ -317,7 +351,10 @@ func (s *Session) Ask(ctx context.Context, prompt string) iter.Seq2[Event, error
 				return
 
 			default:
-				yield(Event{Provider: res.provider}, errors.Join(err, s.usage.Release()))
+				if round == 0 && res.reply == "" {
+					err = errors.Join(err, s.usage.Release())
+				}
+				yield(Event{Provider: res.provider}, err)
 				return
 			}
 
@@ -343,6 +380,7 @@ func (s *Session) Ask(ctx context.Context, prompt string) iter.Seq2[Event, error
 			// withheld are ignored rather than obeyed.
 			if len(res.calls) == 0 || last {
 				s.history.Append(provider.RoleAssistant, res.reply)
+				s.retryPending = false
 				if s.store != nil {
 					if err := s.store.Save(s.saveName, s.SaveConversation()); err != nil {
 						yield(Event{}, fmt.Errorf("answer completed but saving failed: %w", err))
@@ -391,6 +429,9 @@ func (s *Session) round(ctx context.Context, candidates []string, tools []provid
 		}
 
 		res, err := s.streamOne(ctx, name, tools, yield)
+		if err != nil && res.reply != "" {
+			return res, fmt.Errorf("%s: response interrupted after partial output: %w", name, err)
+		}
 		switch {
 		case err == nil:
 			return res, nil
@@ -448,7 +489,8 @@ func (s *Session) streamOne(ctx context.Context, name string, tools []provider.T
 	var reply []byte
 	for chunk, err := range p.Stream(ctx, req) {
 		if err != nil {
-			return roundResult{provider: name}, err
+			res.reply = string(reply)
+			return res, err
 		}
 		if chunk.Usage != nil {
 			u := *chunk.Usage

@@ -7,6 +7,7 @@ package tui
 
 import (
 	"context"
+	"iter"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -54,6 +55,14 @@ type stream struct {
 
 // startStream begins an exchange and returns the handle used to read it.
 func startStream(sess *session.Session, seq int, prompt string) stream {
+	return startExchange(seq, func(ctx context.Context) iter.Seq2[session.Event, error] { return sess.Ask(ctx, prompt) })
+}
+
+func startRetry(sess *session.Session, seq int) stream {
+	return startExchange(seq, sess.Retry)
+}
+
+func startExchange(seq int, exchange func(context.Context) iter.Seq2[session.Event, error]) stream {
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan streamPacket, streamBuffer)
 	done := make(chan struct{})
@@ -62,7 +71,7 @@ func startStream(sess *session.Session, seq int, prompt string) stream {
 		defer close(ch)
 		defer close(done)
 
-		for event, err := range sess.Ask(ctx, prompt) {
+		for event, err := range exchange(ctx) {
 			// Guarding the send against cancellation is what lets
 			// ctrl+c return control immediately: without it the
 			// goroutine would block on a channel nobody is reading

@@ -481,6 +481,27 @@ it first; if the cancelled worker is still stopping, retry `/mode` once it has
 stopped. An open approval question keeps control of the keyboard. Mode changes
 apply to future actions and do not remove previously read content from history.
 
+### Recovering an interrupted answer
+
+Use `/retry` after a failed or cancelled exchange has stopped. The retry sends
+the existing conversation again without duplicating your question. Completed
+tool results remain in context, but **all tools are disabled for the retry**:
+it requests an answer only and cannot repeat file writes or commands. To request
+new actions, send a new prompt after reviewing the previous results.
+
+Partial output stays visible in the transcript; the retried answer starts again
+from the saved conversation context rather than continuing those partial words.
+If cancellation left tool calls without recorded results, retry is refused:
+review the workspace and use `/clear` to start a new conversation. Successful
+answers, including those whose autosave failed, cannot be repeated with `/retry`.
+Retry state is in-memory and clears on `/clear` or resume.
+
+Each retry reserves a request against the daily cap. Partially answered attempts
+and exchanges that reached tool execution keep their original reservation.
+Provider error frames inside HTTP 200 streams are reported as errors, and EOF
+without a finish marker or `[DONE]` is treated as an interruption. Automatic
+provider fallback stops once partial text has arrived, avoiding mixed answers.
+
 ---
 
 ## Tools

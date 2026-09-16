@@ -29,6 +29,7 @@ const maxShownLines = 200
 // have nowhere else to be discovered.
 const helpText = `Commands
   /mode [chat|code|agent] show or change the permission mode
+  /retry                  retry an interrupted answer with tools disabled
   /model                 show the provider and model in use
   /model <model>         switch model on the current provider
   /model <provider>      switch provider, keeping its configured model
@@ -77,6 +78,9 @@ func (m model) runCommand(text string) (tea.Model, tea.Cmd) {
 		m.applyModel(args)
 	case "/mode":
 		m.applyMode(args)
+	case "/retry":
+		cmd := m.retry(args)
+		return m, cmd
 	case "/read":
 		m.readFile(remainder(text))
 	case "/search":
@@ -88,6 +92,37 @@ func (m model) runCommand(text string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// retry continues failed history with tool execution disabled.
+func (m *model) retry(args []string) tea.Cmd {
+	if len(args) != 0 {
+		m.append(block{kind: blockError, text: "usage: /retry"})
+		return nil
+	}
+	if m.busy || m.asking {
+		m.append(block{kind: blockNotice, text: "finish the current exchange before retrying"})
+		return nil
+	}
+	if m.current.done != nil {
+		select {
+		case <-m.current.done:
+		default:
+			m.append(block{kind: blockNotice, text: "still stopping — retry after the exchange has stopped"})
+			return nil
+		}
+	}
+	if err := m.sess.CanRetry(); err != nil {
+		m.append(block{kind: blockInfo, text: err.Error()})
+		return nil
+	}
+	m.append(block{kind: blockNotice, text: "retrying the answer with tools disabled"})
+	m.seq++
+	m.busy = true
+	m.pending = ""
+	m.answered = m.sess.Provider()
+	m.current = startRetry(m.sess, m.seq)
+	return waitForStream(m.current)
 }
 
 // applyMode replaces the tools as well as the label. Tool closures capture

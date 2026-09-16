@@ -30,6 +30,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.finish()
+		if m.sess.CanRetry() == nil {
+			m.append(block{kind: blockNotice, text: "answer interrupted — /retry requests an answer with tools disabled"})
+		}
 		return m, nil
 
 	case approvalRequestMsg:

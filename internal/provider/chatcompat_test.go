@@ -659,7 +659,6 @@ func TestStreamFlushesToolCallsWithoutFinishReason(t *testing.T) {
 	}
 	cases := map[string][]string{
 		"done sentinel": append(slices.Clone(fragments), "data: [DONE]\n\n"),
-		"stream ends":   fragments,
 	}
 	for name, frames := range cases {
 		t.Run(name, func(t *testing.T) {
