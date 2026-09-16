@@ -35,6 +35,7 @@ const helpText = `Commands
   /clear                 forget the conversation so far
   /read <file>           show a file from the working directory
   /search <text>         find that text in the working directory
+  /save <name>           save this conversation so you can resume it later
   /usage                 show requests used against the daily cap
   /help                  show this
 
@@ -76,11 +77,32 @@ func (m model) runCommand(text string) (tea.Model, tea.Cmd) {
 		m.readFile(remainder(text))
 	case "/search":
 		m.searchFiles(remainder(text))
+	case "/save":
+		m.saveConversation(remainder(text))
 	default:
 		m.append(block{kind: blockError, text: fmt.Sprintf("unknown command %q; try /help", name)})
 	}
 
 	return m, nil
+}
+
+// saveConversation writes the current conversation to the on-disk store under
+// the given name. With no name, or with no store (a test model), it reports
+// rather than failing silently.
+func (m *model) saveConversation(name string) {
+	if m.sessions == nil {
+		m.append(block{kind: blockError, text: "saving is unavailable in this session"})
+		return
+	}
+	if strings.TrimSpace(name) == "" {
+		m.append(block{kind: blockError, text: "usage: /save <name>"})
+		return
+	}
+	if err := m.sessions.Save(name, m.sess.SaveConversation()); err != nil {
+		m.append(block{kind: blockError, text: "save failed: " + err.Error()})
+		return
+	}
+	m.append(block{kind: blockNotice, text: "saved conversation " + name})
 }
 
 // remainder returns everything after the command word, with only the space that

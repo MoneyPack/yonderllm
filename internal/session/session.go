@@ -88,6 +88,8 @@ type Event struct {
 
 // Session is one conversation bound to a configuration and a provider chain.
 type Session struct {
+	store    *Sessions
+	saveName string
 	cfg      config.Config
 	resolve  Resolver
 	history  History
@@ -118,6 +120,37 @@ func (s *Session) Usage() *Usage { return s.usage }
 // persistent counter; New otherwise keeps library sessions in memory.
 func (s *Session) SetUsage(u *Usage) { s.usage = u }
 
+// SaveConversation captures the current conversation into a SavedConversation
+// ready for a *Sessions store. The provider and model are pinned alongside the
+// turns so that a resumed conversation keeps its context.
+func (s *Session) SaveConversation() SavedConversation {
+	h := &s.history
+	return SavedConversation{
+		Provider: s.active,
+		Model:    s.Model(),
+		System:   h.System(),
+		Messages: h.Turns(),
+	}
+}
+
+// LoadConversation validates and restores history and model selection before
+// the first Ask. Credentials, tools, approval state and usage are never loaded.
+func (s *Session) LoadConversation(conv SavedConversation) error {
+	if err := validateMessages(conv.Messages); err != nil {
+		return err
+	}
+	if _, ok := s.cfg.Providers[conv.Provider]; !ok {
+		return fmt.Errorf("saved provider %q is not configured", conv.Provider)
+	}
+	if conv.Model == "" {
+		return errors.New("saved model is empty")
+	}
+	s.active = conv.Provider
+	s.SetModel(conv.Model)
+	s.history = History{system: redactable(conv.System), turns: redactSavedMessages(conv.Messages)}
+	return nil
+}
+
 // Provider reports the provider that will be tried first.
 func (s *Session) Provider() string { return s.active }
 
@@ -140,7 +173,12 @@ func (s *Session) Credentialed(name string) bool { return s.cfg.Credentialed(nam
 
 // Clear drops the conversation turns, keeping the system prompt and every
 // counter. /clear frees context, it does not refund the day's budget.
-func (s *Session) Clear() { s.history.Clear() }
+func (s *Session) Clear() {
+	s.history.Clear()
+	if s.store != nil {
+		s.saveName = fmt.Sprintf("session-%x", randomSessionID())
+	}
+}
 
 // Model reports the model id configured for the active provider.
 func (s *Session) Model() string { return s.cfg.Providers[s.active].Model }
@@ -305,6 +343,12 @@ func (s *Session) Ask(ctx context.Context, prompt string) iter.Seq2[Event, error
 			// withheld are ignored rather than obeyed.
 			if len(res.calls) == 0 || last {
 				s.history.Append(provider.RoleAssistant, res.reply)
+				if s.store != nil {
+					if err := s.store.Save(s.saveName, s.SaveConversation()); err != nil {
+						yield(Event{}, fmt.Errorf("answer completed but saving failed: %w", err))
+						return
+					}
+				}
 				yield(Event{Provider: res.provider, Done: true, Usage: total}, nil)
 				return
 			}

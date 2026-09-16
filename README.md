@@ -388,6 +388,50 @@ limit but still records requests.
 
 Bare `yonderllm` opens it. The transcript scrolls above; you type below.
 
+### Save and resume conversations
+
+Interactive sessions automatically save after each completed exchange. Resume
+the most recently saved conversation with `yonderllm --last`, or keep a named
+snapshot with `/save project-notes` in the TUI.
+
+```sh
+yonderllm sessions
+yonderllm run --resume project-notes
+yonderllm ask --save project-notes "Explain this project"
+yonderllm run --resume project-notes "What should I change first?"
+yonderllm --last
+yonderllm --no-save
+yonderllm sessions delete project-notes
+```
+
+`ask` and headless `run` start fresh without saving unless you use `--save`,
+`--resume`, or `--last`. `--no-save` disables automatic saving; an explicit
+`/save` still writes a snapshot. Names use lowercase letters, digits, dots,
+hyphens and underscores (up to 80 characters, no leading/trailing dot).
+Saving an existing name replaces that snapshot.
+
+Resume restores messages, the system prompt, and provider/model selection.
+Explicit `--provider` and `--model` flags override saved selection. Credentials,
+permission modes, approvals, and usage counters come from the current run;
+saved tool calls are historical context and are never executed on load.
+Each resumed run gets a new autosave name unless `--save <name>` is supplied.
+`/clear` starts a new autosave without deleting the prior snapshot.
+
+Files are versioned JSON under `yonderllm/sessions` in the OS user configuration
+directory (`%APPDATA%` on Windows, `$XDG_CONFIG_HOME` or `~/.config` on Linux,
+`~/Library/Application Support` on macOS). Saves use a filesystem lock and
+temporary-file replacement. `sessions` lists valid snapshots newest first;
+unsupported or corrupt files are excluded from listing and rejected on explicit
+resume. Snapshots are limited to 16 MiB.
+
+Recognized credential patterns are redacted from message text, system prompts,
+and tool arguments before saving. Files are **not encrypted**, and pattern-based
+redaction cannot identify every secret. Use `--no-save` for sensitive sessions.
+On Unix, newly created files use owner-only permissions; Windows access follows
+the user directory's ACLs. Autosave preserves completed exchanges, not a response
+interrupted mid-stream. Named snapshots include conversation context, not UI-only
+notices or the output of local `/read` and `/search` commands.
+
 ### Slash commands
 
 ```

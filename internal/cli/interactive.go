@@ -46,9 +46,14 @@ func (e *env) runTUI() error {
 	if err != nil {
 		return err
 	}
+	store, err := e.prepareConversation(sess, true)
+	if err != nil {
+		return err
+	}
 
 	return tui.Run(tui.Options{
 		Session:   sess,
+		Sessions:  store,
 		Mode:      mode,
 		Approvals: approvals,
 		In:        e.in,

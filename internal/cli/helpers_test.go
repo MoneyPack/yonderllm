@@ -300,6 +300,8 @@ func scrubEnv(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", cache)
 	t.Setenv("XDG_CACHE_HOME", cache)
 	t.Setenv("HOME", cache)
+	t.Setenv("APPDATA", cache)
+	t.Setenv("XDG_CONFIG_HOME", cache)
 }
 
 // newHarness scrubs the environment, writes a config that points groq at the

@@ -49,7 +49,7 @@ yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 				return err
 			}
 
-			sess, err := e.newSession()
+			sess, err := e.resolveSessionOrDefault()
 			if err != nil {
 				return err
 			}

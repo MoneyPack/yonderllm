@@ -48,6 +48,10 @@ type env struct {
 	maxTokens  int
 	dailyCap   int
 	yes        bool
+	resume     string
+	last       bool
+	save       string
+	noSave     bool
 }
 
 // resolve loads configuration and overlays the global flags.
@@ -133,6 +137,9 @@ func newRoot(e *env) *cobra.Command {
 		// Cobra prints usage on an unknown-flag error before our handler
 		// sees it; silencing both above lets Execute format failures.
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if (e.resume != "" || e.last) && !interactiveStdin(cmd.InOrStdin()) {
+				return fmt.Errorf("resume needs a terminal or a prompt through ask/run")
+			}
 			// A bare invocation from a terminal is the primary way in:
 			// open the interactive session. Anywhere else — a pipe, a
 			// script, a test harness — there is nobody to type at a
@@ -153,6 +160,12 @@ func newRoot(e *env) *cobra.Command {
 	flags.IntVar(&e.maxTokens, "max-tokens", 0, "cap on output tokens per request")
 	flags.IntVar(&e.dailyCap, "daily-cap", -1, "cap on requests per day (0 disables the cap)")
 	flags.BoolVar(&e.yes, "yes", false, "accept agent mode's writes and commands in advance (agent mode only)")
+	flags.StringVar(&e.resume, "resume", "", "resume a saved conversation")
+	flags.BoolVar(&e.last, "last", false, "resume the most recently saved conversation")
+	flags.StringVar(&e.save, "save", "", "save the completed conversation under this name")
+	flags.BoolVar(&e.noSave, "no-save", false, "disable automatic conversation saving")
+	root.MarkFlagsMutuallyExclusive("resume", "last")
+	root.MarkFlagsMutuallyExclusive("save", "no-save")
 
 	root.SetIn(e.in)
 	root.SetOut(e.out)
@@ -168,6 +181,7 @@ func newRoot(e *env) *cobra.Command {
 	root.AddCommand(
 		newAskCmd(e),
 		newRunCmd(e),
+		newSessionsCmd(e),
 		newModelsCmd(e),
 		newProvidersCmd(e),
 		newConfigCmd(e),

@@ -35,6 +35,7 @@ type Options struct {
 	Session   *session.Session
 	Mode      perm.Mode
 	Approvals *Approvals
+	Sessions  *session.Sessions
 	In        io.Reader
 	Out       io.Writer
 }
@@ -56,7 +57,7 @@ func Run(opts Options) error {
 		teaOpts = append(teaOpts, tea.WithOutput(opts.Out))
 	}
 
-	if _, err := tea.NewProgram(newModel(opts.Session, opts.Mode, opts.Approvals), teaOpts...).Run(); err != nil {
+	if _, err := tea.NewProgram(newModelWithSessions(opts.Session, opts.Mode, opts.Approvals, opts.Sessions), teaOpts...).Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
 	}
 	return nil

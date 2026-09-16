@@ -1171,3 +1171,44 @@ func TestAskPassesToolSchemaThroughUntouched(t *testing.T) {
 		t.Errorf("description = %q, want it forwarded", sent[0].Description)
 	}
 }
+
+// SaveConversation and LoadConversation must round-trip through a *Sessions
+// store: a resumed session carries the same turns and system prompt, and a
+// re-saved resume is identical (idempotent persistence).
+func TestSaveLoadConversationRoundTrip(t *testing.T) {
+	s1 := New(testConfig("groq"), func(string) (provider.Provider, error) { return nil, nil })
+	s1.history.SetSystem("be terse")
+	s1.history.Append(provider.RoleUser, "hello")
+	s1.history.Append(provider.RoleAssistant, "hi")
+
+	dir := t.TempDir()
+	store, err := OpenSessions(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save("two", s1.SaveConversation()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Get("two")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// Restore into a second, empty session.
+	s2 := New(testConfig("groq"), func(string) (provider.Provider, error) { return nil, nil })
+	s2.LoadConversation(got)
+	if got := s2.History().System(); got != "be terse" {
+		t.Errorf("system = %q", got)
+	}
+	if got := s2.History().Len(); got != 2 {
+		t.Errorf("turns = %d, want 2", got)
+	}
+	turns := s2.History().Turns()
+	if turns[0].Role != provider.RoleUser || turns[0].Content != "hello" {
+		t.Errorf("turn0 = %+v", turns[0])
+	}
+	if turns[1].Role != provider.RoleAssistant || turns[1].Content != "hi" {
+		t.Errorf("turn1 = %+v", turns[1])
+	}
+}

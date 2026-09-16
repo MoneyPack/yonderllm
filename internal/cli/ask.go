@@ -22,7 +22,8 @@ func newAskCmd(e *env) *cobra.Command {
 		Use:   "ask [prompt]",
 		Short: "Send one prompt and stream the answer",
 		Long: "Send a single prompt to the active provider and stream the reply to\n" +
-			"standard output. No conversation is kept: each invocation starts clean.\n\n" +
+			"standard output. Starts fresh unless --resume or --last is supplied.\n" +
+			"Use --save <name> to keep the completed exchange.\n\n" +
 			"With no prompt argument the prompt is read from standard input, which\n" +
 			"makes ask usable at the end of a pipeline.",
 		Example: `yonderllm ask "explain the borrow checker"
@@ -35,7 +36,7 @@ yonderllm -p gemini ask "summarise the CAP theorem"`,
 				return err
 			}
 
-			sess, err := e.newSession()
+			sess, err := e.resolveSessionOrDefault()
 			if err != nil {
 				return err
 			}

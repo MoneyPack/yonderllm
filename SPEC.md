@@ -61,6 +61,20 @@ Three ways to drive the same core:
 
 `/model`, `/clear`, `/read`, `/search`, `/usage`, `/help`.
 
+`/save <name>` writes a named conversation snapshot. Interactive sessions
+autosave completed exchanges; `--no-save` disables autosave. `--resume <name>`
+and `--last` restore saved context in the TUI or before a headless prompt.
+`--save <name>` opts a one-shot exchange into persistence. `sessions` lists
+valid snapshots by save time; `sessions delete <name>` removes one.
+
+Snapshots are versioned JSON beside configuration, outside the cache. Writes
+are locked and installed through temporary-file replacement. Recognized secrets
+are redacted at rest, including the system prompt and structured tool arguments;
+this is best-effort redaction, not encryption. Resume restores provider/model
+and conversation history, never permissions, approvals, credentials, or usage.
+Incomplete tool exchanges are rejected rather than replayed. Each resumed run
+uses a new autosave unless an explicit save name is supplied.
+
 `/read` and `/search` are the first commands gated by the permission policy:
 both call `perm.Policy.Check` through `internal/workspace` and are refused in
 `chat` mode.

@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"yonderllm/internal/perm"
+	"yonderllm/internal/provider"
 	"yonderllm/internal/session"
 )
 
@@ -66,6 +67,9 @@ type model struct {
 	// can be matched against when it comes to rewrite the block.
 	asked int
 
+	// sessions is the optional on-disk store used by /save.
+	sessions *session.Sessions
+
 	width  int
 	height int
 	// ready is false until the first WindowSizeMsg arrives. Bubble Tea
@@ -80,6 +84,13 @@ type model struct {
 // approvals may be nil, and is nil wherever the gated tools were built without
 // an approver: with nothing able to ask, there is nothing to answer.
 func newModel(sess *session.Session, mode perm.Mode, approvals *Approvals) model {
+	return newModelWithSessions(sess, mode, approvals, nil)
+}
+
+// newModelWithSessions is newModel with an on-disk conversation store attached,
+// for the TUI's /save. Passing nil keeps saving unavailable, which is how tests
+// that do not exercise it stay unchanged.
+func newModelWithSessions(sess *session.Session, mode perm.Mode, approvals *Approvals, sessions *session.Sessions) model {
 	s := newStyles()
 
 	input := textarea.New()
@@ -99,8 +110,24 @@ func newModel(sess *session.Session, mode perm.Mode, approvals *Approvals) model
 		input:     input,
 		view:      viewport.New(0, 0),
 		approvals: approvals,
+		sessions:  sessions,
 	}
 	m.blocks = []block{{kind: blockInfo, text: m.greeting()}}
+	for _, msg := range sess.History().Turns() {
+		switch msg.Role {
+		case provider.RoleUser:
+			m.blocks = append(m.blocks, block{kind: blockUser, text: msg.Content})
+		case provider.RoleAssistant:
+			if msg.Content != "" {
+				m.blocks = append(m.blocks, block{kind: blockAssistant, text: msg.Content, tag: sess.Provider()})
+			}
+			for _, call := range msg.ToolCalls {
+				m.blocks = append(m.blocks, block{kind: blockInfo, text: "previous tool: " + call.Name + " " + call.Arguments})
+			}
+		case provider.RoleTool:
+			m.blocks = append(m.blocks, block{kind: blockInfo, text: "previous tool result: " + msg.Content})
+		}
+	}
 	return m
 }
 
