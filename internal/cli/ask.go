@@ -17,6 +17,7 @@ import (
 // pipe. Its machine-facing twin is run --json.
 func newAskCmd(e *env) *cobra.Command {
 	var quiet bool
+	var appendStdin bool
 
 	cmd := &cobra.Command{
 		Use:   "ask [prompt]",
@@ -27,11 +28,11 @@ func newAskCmd(e *env) *cobra.Command {
 			"With no prompt argument the prompt is read from standard input, which\n" +
 			"makes ask usable at the end of a pipeline.",
 		Example: `yonderllm ask "explain the borrow checker"
-git diff | yonderllm ask "write a commit message for this diff"
+git diff | yonderllm ask --stdin "write a commit message for this diff"
 yonderllm -p gemini ask "summarise the CAP theorem"`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prompt, err := readPrompt(cmd.InOrStdin(), args)
+			prompt, err := readPromptWithContext(cmd.InOrStdin(), args, appendStdin)
 			if err != nil {
 				return err
 			}
@@ -79,12 +80,17 @@ yonderllm -p gemini ask "summarise the CAP theorem"`,
 	}
 
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress provider notices on stderr")
+	cmd.Flags().BoolVar(&appendStdin, "stdin", false, "append piped stdin to the prompt argument")
 	return cmd
 }
 
 // errNoPrompt is returned when neither argv nor stdin supplied anything. It is
 // a usage problem rather than a runtime one, so it names the two ways to fix it.
 var errNoPrompt = errors.New("no prompt: pass one as an argument or pipe it on stdin")
+
+const maxPromptBytes = 4 * 1024 * 1024
+
+var errPromptTooLarge = errors.New("prompt exceeds the 4 MiB limit; send a smaller input")
 
 // readPrompt takes the prompt from argv when given and from stdin otherwise.
 //
@@ -93,6 +99,13 @@ var errNoPrompt = errors.New("no prompt: pass one as an argument or pipe it on s
 // only the first word would be worse than either erroring or joining.
 func readPrompt(in io.Reader, args []string) (string, error) {
 	if len(args) > 0 {
+		size := len(args) - 1
+		for _, arg := range args {
+			size += len(arg)
+			if size > maxPromptBytes {
+				return "", errPromptTooLarge
+			}
+		}
 		prompt := strings.TrimSpace(strings.Join(args, " "))
 		if prompt == "" {
 			return "", errNoPrompt
@@ -100,15 +113,38 @@ func readPrompt(in io.Reader, args []string) (string, error) {
 		return prompt, nil
 	}
 
-	// bufio keeps the read off a syscall per byte; the prompt is bounded by
-	// the context window anyway, so reading it whole is fine.
-	data, err := io.ReadAll(bufio.NewReader(in))
+	// Bound stdin before allocating the entire input.
+	data, err := io.ReadAll(io.LimitReader(bufio.NewReader(in), maxPromptBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("reading prompt from stdin: %w", err)
+	}
+	if len(data) > maxPromptBytes {
+		return "", errPromptTooLarge
 	}
 	prompt := strings.TrimSpace(string(data))
 	if prompt == "" {
 		return "", errNoPrompt
 	}
 	return prompt, nil
+}
+
+func readPromptWithContext(in io.Reader, args []string, appendStdin bool) (string, error) {
+	if !appendStdin || len(args) == 0 {
+		return readPrompt(in, args)
+	}
+	if interactiveStdin(in) {
+		return "", errors.New("--stdin requires piped input")
+	}
+	prompt, err := readPrompt(in, args)
+	if err != nil {
+		return "", err
+	}
+	context, err := readPrompt(in, nil)
+	if err != nil {
+		return "", err
+	}
+	if len(prompt)+len(context)+2 > maxPromptBytes {
+		return "", errPromptTooLarge
+	}
+	return prompt + "\n\n" + context, nil
 }

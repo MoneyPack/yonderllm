@@ -99,6 +99,9 @@ Detailed guides: [installation](docs/INSTALL.md), [providers](docs/PROVIDERS.md)
 [troubleshooting](docs/TROUBLESHOOTING.md), [scripting](docs/SCRIPTING.md),
 [safety](docs/SAFETY.md), and [development](docs/DEVELOPMENT.md).
 
+See [compatibility and versioning](docs/COMPATIBILITY.md) for the NDJSON contract
+and build metadata (`yonderllm version --json`).
+
 Set one API key and go. Groq's free tier needs no card:
 
 ```sh
@@ -151,7 +154,7 @@ stdin if there are none, so it composes with the rest of your shell.
 ```sh
 yonderllm ask "explain the difference between a mutex and a semaphore"
 
-git diff | yonderllm ask "write a commit message for this diff"
+git diff | yonderllm ask --stdin "write a commit message for this diff"
 
 yonderllm -p gemini ask "summarise the CAP theorem"
 ```

@@ -18,6 +18,7 @@ import (
 // newline-delimited event stream that mirrors [session.Event] one for one.
 func newRunCmd(e *env) *cobra.Command {
 	var asJSON bool
+	var appendStdin bool
 
 	cmd := &cobra.Command{
 		Use:   "run [prompt]",
@@ -47,11 +48,11 @@ yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 			// door into the interactive session. --json rules it out:
 			// a caller asking for machine-readable events wants the
 			// stdin read to fail loudly, not a full-screen interface.
-			if len(args) == 0 && !asJSON && interactiveStdin(cmd.InOrStdin()) {
+			if len(args) == 0 && !asJSON && !appendStdin && interactiveStdin(cmd.InOrStdin()) {
 				return e.runTUI()
 			}
 
-			prompt, err := readPrompt(cmd.InOrStdin(), args)
+			prompt, err := readPromptWithContext(cmd.InOrStdin(), args, appendStdin)
 			if err != nil {
 				return err
 			}
@@ -72,6 +73,7 @@ yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 	}
 
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit newline-delimited JSON events instead of text")
+	cmd.Flags().BoolVar(&appendStdin, "stdin", false, "append piped stdin to the prompt argument")
 	return cmd
 }
 

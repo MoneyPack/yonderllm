@@ -204,11 +204,13 @@ func writeConfigJSON(w io.Writer, cfg config.Config, override string) error {
 	for _, name := range sortedProviderNames(cfg) {
 		pc := cfg.Providers[name]
 		providers = append(providers, wireConfigProvider{
-			Name:      name,
-			Model:     pc.Model,
-			BaseURL:   pc.BaseURL,
-			APIKeyEnv: pc.APIKeyEnv,
-			Ready:     cfg.Credentialed(name),
+			Name:              name,
+			Model:             pc.Model,
+			BaseURL:           pc.BaseURL,
+			APIKeyEnv:         pc.APIKeyEnv,
+			Ready:             cfg.Credentialed(name),
+			OmitStreamOptions: pc.OmitStreamOptions,
+			HeaderEnv:         pc.HeaderEnv,
 		})
 	}
 
@@ -259,11 +261,13 @@ type wireConfig struct {
 }
 
 type wireConfigProvider struct {
-	Name      string `json:"name"`
-	Model     string `json:"model,omitempty"`
-	BaseURL   string `json:"base_url,omitempty"`
-	APIKeyEnv string `json:"api_key_env,omitempty"`
-	Ready     bool   `json:"ready"`
+	OmitStreamOptions bool              `json:"omit_stream_options"`
+	HeaderEnv         map[string]string `json:"header_env,omitempty"`
+	Name              string            `json:"name"`
+	Model             string            `json:"model,omitempty"`
+	BaseURL           string            `json:"base_url,omitempty"`
+	APIKeyEnv         string            `json:"api_key_env,omitempty"`
+	Ready             bool              `json:"ready"`
 }
 
 // configSource resolves the path to report and labels where it came from, so

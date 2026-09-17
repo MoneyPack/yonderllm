@@ -57,6 +57,26 @@ func TestCompatibilityCanOmitStreamOptions(t *testing.T) {
 	}
 }
 
+func TestStreamHasAnAggregateByteLimit(t *testing.T) {
+	// Every individual frame fits the scanner limit, but the response does not.
+	frames := make([]string, 65)
+	for i := range frames {
+		frames[i] = frame(`{"choices":[{"delta":{"content":"` + strings.Repeat("x", 256*1024) + `"}}]}`)
+	}
+	frames = append(frames, "data: [DONE]\n\n")
+	srv, _ := sseServer(t, frames)
+	p := NewChatCompat("stub", srv.URL, "")
+	var got error
+	for _, err := range p.Stream(context.Background(), Request{Model: "tiny"}) {
+		if err != nil {
+			got = err
+		}
+	}
+	if got == nil || !strings.Contains(got.Error(), "limit") {
+		t.Fatalf("aggregate limit: %v", got)
+	}
+}
+
 func TestStreamUnexpectedEOFDoesNotFlushTools(t *testing.T) {
 	srv, _ := sseServer(t, []string{frame(`{"choices":[{"delta":{"content":"partial","tool_calls":[{"index":0,"id":"call","function":{"name":"write","arguments":"{}"}}]}}]}`)})
 	p := NewChatCompat("stub", srv.URL, "", WithHTTPClient(srv.Client()))

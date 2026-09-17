@@ -6,9 +6,10 @@ package tui
 
 import (
 	"strings"
-	"yonderllm/internal/provider"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"yonderllm/internal/provider"
 )
 
 // Update satisfies tea.Model.

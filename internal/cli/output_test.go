@@ -31,3 +31,22 @@ func TestJSONCarriesSchemaVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestPromptInputHasABoundedSize(t *testing.T) {
+	large := strings.Repeat("x", 4*1024*1024+1)
+	if _, err := readPrompt(strings.NewReader(large), nil); err == nil {
+		t.Fatal("unbounded stdin accepted")
+	}
+	if _, err := readPrompt(strings.NewReader(""), []string{large}); err == nil {
+		t.Fatal("unbounded argv accepted")
+	}
+}
+
+func TestExplicitStdinAppendsContextToInstruction(t *testing.T) {
+	for _, command := range []string{"ask", "run"} {
+		h := newHarness(t, newStub(t, "ok"))
+		r := h.runWithInput(t, "diff context\n", command, "--stdin", "explain this")
+		wantCode(t, r, 0)
+		wantLastUserMessage(t, h, "explain this\n\ndiff context")
+	}
+}

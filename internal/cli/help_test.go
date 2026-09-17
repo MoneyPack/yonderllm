@@ -139,7 +139,7 @@ func TestExamplesAreIndentedUniformly(t *testing.T) {
 
 	for _, line := range []string{
 		`  yonderllm ask "explain the borrow checker"`,
-		`  git diff | yonderllm ask "write a commit message for this diff"`,
+		`  git diff | yonderllm ask --stdin "write a commit message for this diff"`,
 		`  yonderllm -p gemini ask "summarise the CAP theorem"`,
 	} {
 		if !strings.Contains(r.stdout, line) {

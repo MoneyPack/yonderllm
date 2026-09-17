@@ -46,11 +46,11 @@ Three ways to drive the same core:
 |---|---|---|
 | TUI | `yonderllm` | interactive full-screen session |
 | CLI | `yonderllm ask "..."` | one-shot from a shell |
-| Headless | `yonderllm ask --json "..."` | scripting, piping into other tools |
+| Headless | `yonderllm run --json "..."` | scripting, piping into other tools |
 
 ### CLI subcommands
 
-- `ask <prompt>` — one-shot completion. `--json` for machine-readable output.
+- `ask <prompt>` — one-shot text completion. `run --json` for machine-readable output.
 - `models` — list free and cheap models on the active provider. `--all` includes
   models priced above the cheap tier; `--json` for machine-readable output.
 - `providers` — list configured providers and their credential status.
@@ -190,9 +190,27 @@ Resolution order — later wins:
 3. Environment variables
 4. Command-line flags
 
-API keys come **only** from environment variables or a config file whose
-permissions restrict it to the owning user. Keys are never printed, never
-logged, and never included in error messages or crash output.
+API keys come **only** from environment variables; config holds their variable
+names. Unix config files must be owner-only (0600); Windows uses ACLs. Provider
+diagnostics redact configured key/header values and recognized key-shaped text.
+Redaction is best effort, not an assurance that arbitrary private text is safe.
+
+Runtime options: `retry_attempts` (0–3, default 0), `retry_backoff_ms` (0–30000,
+default 500), `request_timeout_seconds` (0–3600, default 0/disabled), and
+`output_format` (`text` or `json`, default text, applies to `run`). Retries only
+repeat a quota/5xx-failed model round before text or calls arrive; completed tool
+results are reused without executing them again. Long Retry-After hints skip
+same-provider retry. Explicit `daily_cap = 0` disables the local cap.
+
+Providers accept `omit_stream_options` and environment-backed X-prefixed metadata
+headers via `header_env`. Redirects and URLs with credentials/query/fragment are
+refused. Custom compatible providers require no new compiled adapter.
+
+## Compatibility
+
+`run --json` emits schema 1 events with `schema_version: 1`. Failed output writes
+stop the exchange with a nonzero exit. `version --json` exposes version, build,
+platform, Go and protocol metadata. See [compatibility](docs/COMPATIBILITY.md).
 
 ## 9. Testing
 

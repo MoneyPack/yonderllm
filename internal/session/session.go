@@ -302,7 +302,9 @@ func (s *Session) Retry(ctx context.Context) iter.Seq2[Event, error] {
 }
 
 func (s *Session) exchange(ctx context.Context, prompt string, retry bool) iter.Seq2[Event, error] {
+	parent := ctx
 	return func(yield func(Event, error) bool) {
+		ctx := parent
 		if s.cfg.RequestTimeoutSeconds > 0 {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, time.Duration(s.cfg.RequestTimeoutSeconds)*time.Second)

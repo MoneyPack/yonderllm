@@ -6,6 +6,7 @@ Check the process exit code even when partial output exists.
 
 ```sh
 printf 'Explain a mutex' | yonderllm ask
+git diff | yonderllm ask --stdin "Write a commit message for this diff"
 yonderllm run --json "Explain a mutex" | jq -r 'select(.type=="delta").delta'
 ```
 
@@ -35,6 +36,15 @@ with subprocess.Popen(
 Events are `delta`, `notice`, `tool`, `tool_result`, `done`, or `error`. Tool IDs
 match start/result events; a `done` event means the exchange completed. Before
 streaming begins, argument/config failures are reported on stderr.
+
+Every event includes `schema_version: 1`. Ignore unknown fields to remain
+compatible with additive releases. A closed output pipe stops consumption and
+returns failure, instead of silently reporting success.
+
+`--stdin` explicitly appends piped input to a prompt argument with a blank line
+between them. Without it, arguments take precedence over stdin, preserving the
+existing behavior. Prompts are limited to 4 MiB; streams to 16 MiB per provider
+round (and 1 MiB per SSE line). The configured timeout can also bound duration.
 
 Noninteractive runs have no consent UI. Read-only code mode can expose reads and
 searches. Writes require explicit agent mode and `--yes`; destructive commands

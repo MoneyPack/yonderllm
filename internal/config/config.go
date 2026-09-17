@@ -231,7 +231,7 @@ func mergeTOML(cfg *Config, data []byte) error {
 		if fp.Model != "" {
 			base.Model = fp.Model
 		}
-		if fp.APIKeyEnv != "" {
+		if md.IsDefined("providers", name, "api_key_env") {
 			base.APIKeyEnv = fp.APIKeyEnv
 		}
 		cfg.Providers[name] = base

@@ -310,6 +310,7 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 		calls := newToolCallBuffer()
+		streamBytes := 0
 		finished := false
 		// flush emits whatever calls have been reassembled but not yet
 		// handed over. It runs at an explicit [DONE] without a finish
@@ -325,6 +326,11 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		}
 
 		for scanner.Scan() {
+			streamBytes += len(scanner.Bytes()) + 1
+			if streamBytes > 16*1024*1024 {
+				yield(Chunk{}, fmt.Errorf("%s: response stream exceeds the 16 MiB limit", p.name))
+				return
+			}
 			line := strings.TrimSpace(scanner.Text())
 			// Blank separators and comment/keep-alive lines carry no data.
 			if line == "" || strings.HasPrefix(line, ":") {

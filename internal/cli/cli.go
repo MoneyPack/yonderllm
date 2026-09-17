@@ -179,6 +179,7 @@ func newRoot(e *env) *cobra.Command {
 	root.SetHelpCommand(helpCmd)
 
 	root.AddCommand(
+		newVersionCmd(),
 		newAskCmd(e),
 		newRunCmd(e),
 		newSessionsCmd(e),
