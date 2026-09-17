@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"yonderllm/internal/config"
 	"yonderllm/internal/provider"
@@ -212,6 +213,16 @@ func TestAskFallsBackWhenProviderIsUnavailable(t *testing.T) {
 	}
 	if first.calls != 1 || second.calls != 1 {
 		t.Errorf("calls: groq=%d gemini=%d, want 1 and 1", first.calls, second.calls)
+	}
+}
+
+func TestFallbackNoticeNamesWhyProviderWasSkipped(t *testing.T) {
+	first := &fakeProvider{name: "groq", err: &provider.QuotaError{Provider: "groq", RetryAfter: time.Minute}}
+	second := &fakeProvider{name: "gemini", chunks: textChunks("ok")}
+	s := New(testConfig("groq", "gemini"), resolverFor(first, second))
+	_, notices, _, err := collect(s.Ask(context.Background(), "hi"))
+	if err != nil || len(notices) != 1 || !strings.Contains(notices[0], "quota") || !strings.Contains(notices[0], "1m") {
+		t.Fatalf("fallback notices = %v, error=%v", notices, err)
 	}
 }
 

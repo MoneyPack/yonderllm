@@ -6,6 +6,7 @@ package tui
 
 import (
 	"strings"
+	"yonderllm/internal/provider"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -155,7 +156,7 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		// An error does not end the stream — the session may still be
 		// falling back to another provider — so busy stays set and the
 		// close message remains the single point that clears it.
-		m.append(block{kind: blockError, text: packet.err.Error()})
+		m.append(block{kind: blockError, text: packet.err.Error() + "\n" + provider.FailureHint(packet.err)})
 		m.activity = "recovering"
 
 	case packet.event.Tool != nil:

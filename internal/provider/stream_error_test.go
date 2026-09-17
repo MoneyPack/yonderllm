@@ -45,6 +45,18 @@ func TestStreamErrorRedactsCredentialFromDiagnostics(t *testing.T) {
 	}
 }
 
+func TestCompatibilityCanOmitStreamOptions(t *testing.T) {
+	srv, seen := sseServer(t, []string{"data: [DONE]\n\n"})
+	p := NewChatCompat("strict", srv.URL, "", WithoutStreamOptions())
+	_, _, err := collect(p.Stream(context.Background(), Request{Model: "tiny"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen.StreamOptions != nil {
+		t.Fatal("strict server received stream_options")
+	}
+}
+
 func TestStreamUnexpectedEOFDoesNotFlushTools(t *testing.T) {
 	srv, _ := sseServer(t, []string{frame(`{"choices":[{"delta":{"content":"partial","tool_calls":[{"index":0,"id":"call","function":{"name":"write","arguments":"{}"}}]}}]}`)})
 	p := NewChatCompat("stub", srv.URL, "", WithHTTPClient(srv.Client()))

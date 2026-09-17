@@ -423,6 +423,9 @@ func (s *Session) round(ctx context.Context, candidates []string, tools []provid
 
 		if i > 0 {
 			notice := fmt.Sprintf("falling back to %s after %s failed", name, candidates[i-1])
+			if len(errs) > 0 {
+				notice += ": " + provider.FailureHint(errs[len(errs)-1])
+			}
 			if !yield(Event{Notice: notice, Provider: name}, nil) {
 				return roundResult{provider: name}, errStopped
 			}

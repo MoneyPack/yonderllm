@@ -25,7 +25,8 @@ type ChatCompat struct {
 	client  *http.Client
 	// extraHeaders are sent on every request. OpenRouter, for instance, asks
 	// callers to identify themselves via HTTP-Referer and X-Title.
-	extraHeaders map[string]string
+	extraHeaders      map[string]string
+	omitStreamOptions bool
 }
 
 // NewChatCompat builds an adapter. baseURL must already include any version
@@ -62,6 +63,11 @@ func WithHTTPClient(c *http.Client) ChatOption {
 // WithHeader adds a header sent on every request.
 func WithHeader(key, value string) ChatOption {
 	return func(p *ChatCompat) { p.extraHeaders[key] = value }
+}
+
+// WithoutStreamOptions supports servers which reject the optional usage field.
+func WithoutStreamOptions() ChatOption {
+	return func(p *ChatCompat) { p.omitStreamOptions = true }
 }
 
 // Name reports the provider's stable identifier.
@@ -238,6 +244,9 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 			Temperature:   req.Temperature,
 			Stream:        true,
 			StreamOptions: &streamOptions{IncludeUsage: true},
+		}
+		if p.omitStreamOptions {
+			body.StreamOptions = nil
 		}
 		for _, t := range req.Tools {
 			body.Tools = append(body.Tools, wireTool{
