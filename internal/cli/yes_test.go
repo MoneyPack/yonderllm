@@ -10,6 +10,10 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -18,8 +22,16 @@ import (
 // The point of the flag: a non-interactive agent run with --yes may execute a
 // command, with nobody to ask and nothing to prompt.
 func TestRunWithYesRunsACommandWithoutAsking(t *testing.T) {
+	t.Chdir(filepath.Dir(os.Args[0]))
+	// A self-contained child avoids go env's asynchronous telemetry sidecar
+	// writing into the temporary HOME while test cleanup removes it.
+	t.Setenv("YONDERLLM_TEST_OS_CHILD", "1")
+	args, err := json.Marshal(map[string]any{"command": []string{"./" + filepath.Base(os.Args[0]), "-test.run=^TestCommandOSChild$"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := newHarness(t, newStubWithRounds(t, [][]string{
-		toolCallRound("call_1", "run_command", `{"command":["go","env","GOOS"]}`),
+		toolCallRound("call_1", "run_command", string(args)),
 		proseRound("done"),
 	}))
 
@@ -33,6 +45,14 @@ func TestRunWithYesRunsACommandWithoutAsking(t *testing.T) {
 	if !strings.Contains(result.Tool.Result, runtime.GOOS) {
 		t.Errorf("the result does not carry the command's output: %q", result.Tool.Result)
 	}
+}
+
+func TestCommandOSChild(t *testing.T) {
+	if os.Getenv("YONDERLLM_TEST_OS_CHILD") != "1" {
+		return
+	}
+	fmt.Println(runtime.GOOS)
+	os.Exit(0)
 }
 
 // Without the flag the same run has no way to put the question to anyone, so
