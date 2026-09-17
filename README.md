@@ -92,6 +92,9 @@ yonderllm completion powershell | Out-String | Invoke-Expression
 
 ## Quick start
 
+Community: [contributing](CONTRIBUTING.md), [conduct](CODE_OF_CONDUCT.md),
+[security reporting](SECURITY.md), [issues](https://github.com/MoneyPack/yonderllm/issues).
+
 Detailed guides: [installation](docs/INSTALL.md), [providers](docs/PROVIDERS.md),
 [troubleshooting](docs/TROUBLESHOOTING.md), [scripting](docs/SCRIPTING.md),
 [safety](docs/SAFETY.md), and [development](docs/DEVELOPMENT.md).
