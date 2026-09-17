@@ -8,6 +8,7 @@ Source builds default to `dev`. Release builders stamp `Version`, `BuildCommit`
 and `BuildDate` using Go linker flags:
 
 ```sh
+mkdir -p bin
 go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.2.0 -X yonderllm/internal/cli.BuildCommit=COMMIT -X yonderllm/internal/cli.BuildDate=UTC_DATE" -o bin/yonderllm ./cmd/yonderllm
 ```
 

@@ -77,3 +77,24 @@ func TestCancelDuringBackoffDoesNotDispatchAnotherAttempt(t *testing.T) {
 		t.Fatalf("calls=%d error=%v", p.calls, got)
 	}
 }
+
+func TestCanceledRetryContextIsCheckedAfterBackoff(t *testing.T) {
+	p := &fakeProvider{name: "groq", err: provider.ErrUnavailable}
+	cfg := testConfig("groq")
+	cfg.RetryAttempts = 1
+	cfg.RetryBackoffMS = 1
+	s := New(cfg, resolverFor(p))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for event, err := range s.Ask(ctx, "hello") {
+		if event.Notice != "" {
+			cancel()
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if p.calls != 1 {
+		t.Fatalf("canceled retry dispatched %d attempts", p.calls)
+	}
+}

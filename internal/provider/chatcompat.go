@@ -607,9 +607,26 @@ func redactKeyish(s string) string {
 		trimmed := strings.Trim(f, `"'.,:;()[]`)
 		if trimmed != "" && looksLikeKey(trimmed) {
 			fields[i] = strings.ReplaceAll(f, trimmed, "[redacted]")
+			continue
+		}
+		for _, prefix := range []string{"sk-", "sk_", "gsk_", "AIza", "or-"} {
+			if at := strings.Index(f, prefix); at >= 0 {
+				end := at
+				for end < len(f) && isKeyChar(f[end]) {
+					end++
+				}
+				if end-at >= 16 {
+					fields[i] = f[:at] + "[redacted]" + f[end:]
+					break
+				}
+			}
 		}
 	}
 	return strings.Join(fields, " ")
+}
+
+func isKeyChar(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '-' || b == '_'
 }
 
 // looksLikeKey reports whether a token resembles an API key: anything carrying

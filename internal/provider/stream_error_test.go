@@ -45,6 +45,16 @@ func TestStreamErrorRedactsCredentialFromDiagnostics(t *testing.T) {
 	}
 }
 
+func TestStreamErrorRedactsKeyEmbeddedInAssignment(t *testing.T) {
+	secret := "sk-abcdefghijklmnopqrstuv"
+	srv, _ := sseServer(t, []string{frame(`{"error":{"message":"credential=` + secret + `"}}`)})
+	p := NewChatCompat("stub", srv.URL, "different-key", WithHTTPClient(srv.Client()))
+	_, _, err := collect(p.Stream(context.Background(), Request{Model: "test"}))
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("embedded diagnostic = %v", err)
+	}
+}
+
 func TestCompatibilityCanOmitStreamOptions(t *testing.T) {
 	srv, seen := sseServer(t, []string{"data: [DONE]\n\n"})
 	p := NewChatCompat("strict", srv.URL, "", WithoutStreamOptions())

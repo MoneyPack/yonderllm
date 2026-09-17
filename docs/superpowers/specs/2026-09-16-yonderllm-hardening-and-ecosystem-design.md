@@ -6,7 +6,7 @@ Execute the ten approved improvement areas in order while preserving yonderllm's
 ## Constraints
 - Go 1.27+ and Windows-compatible behavior remain supported.
 - No local inference, model weights, GPU runtime, or required daemon.
-- No always-on HTTP server. Existing `ask --json` / `run --json` remain the programmatic boundary.
+- No always-on HTTP server. Existing `run --json` remains the programmatic boundary.
 - Credentials remain environment-backed and are never printed or persisted as plaintext.
 - Chat mode remains incapable of filesystem or shell access.
 - Tests must use deterministic local fixtures; no live provider calls in CI.

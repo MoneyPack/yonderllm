@@ -45,6 +45,7 @@ Requires Go 1.27 or newer.
 ```sh
 git clone https://github.com/MoneyPack/yonderllm.git
 cd yonderllm
+mkdir -p bin
 go build -o bin/yonderllm ./cmd/yonderllm
 ```
 
@@ -68,6 +69,7 @@ go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.1.0" \
 On Windows PowerShell:
 
 ```powershell
+New-Item -ItemType Directory -Force .\bin | Out-Null
 go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.1.0" `
   -o .\bin\yonderllm.exe .\cmd\yonderllm
 ```

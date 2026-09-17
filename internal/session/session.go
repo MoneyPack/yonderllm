@@ -459,6 +459,9 @@ func (s *Session) round(ctx context.Context, candidates []string, tools []provid
 				timer.Stop()
 				return res, ctx.Err()
 			case <-timer.C:
+				if ctx.Err() != nil {
+					return res, ctx.Err()
+				}
 			}
 			res, err = s.streamOne(ctx, name, tools, yield)
 		}
