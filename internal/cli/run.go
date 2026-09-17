@@ -83,14 +83,15 @@ yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 // added so a consumer can switch on a single key instead of inferring the kind
 // from which fields happen to be present.
 type wireEvent struct {
-	Type     string     `json:"type"`
-	Delta    string     `json:"delta,omitempty"`
-	Notice   string     `json:"notice,omitempty"`
-	Provider string     `json:"provider,omitempty"`
-	Model    string     `json:"model,omitempty"`
-	Tool     *wireTool  `json:"tool,omitempty"`
-	Error    string     `json:"error,omitempty"`
-	Usage    *wireUsage `json:"usage,omitempty"`
+	SchemaVersion int        `json:"schema_version"`
+	Type          string     `json:"type"`
+	Delta         string     `json:"delta,omitempty"`
+	Notice        string     `json:"notice,omitempty"`
+	Provider      string     `json:"provider,omitempty"`
+	Model         string     `json:"model,omitempty"`
+	Tool          *wireTool  `json:"tool,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	Usage         *wireUsage `json:"usage,omitempty"`
 }
 
 // wireTool describes one tool invocation.
@@ -150,19 +151,24 @@ func newWireUsage(u *provider.Usage) *wireUsage {
 func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, prompt string) error {
 	enc := json.NewEncoder(cmd.OutOrStdout())
 
+	var outputErr error
 	emit := func(ev wireEvent) {
+		ev.SchemaVersion = 1
 		ev.Model = sess.Model()
 		if ev.Provider == "" {
 			ev.Provider = sess.Provider()
 		}
-		// An encode failure means stdout is gone; there is nowhere left
-		// to report it, and the exchange itself still succeeded.
-		_ = enc.Encode(ev)
+		if outputErr == nil {
+			outputErr = enc.Encode(ev)
+		}
 	}
 
 	for ev, err := range sess.Ask(ctx, prompt) {
 		if err != nil {
 			emit(wireEvent{Type: "error", Error: err.Error()})
+			if outputErr != nil {
+				return outputErr
+			}
 			return err
 		}
 		switch {
@@ -176,6 +182,9 @@ func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, 
 		}
 		if ev.Done {
 			emit(wireEvent{Type: "done", Provider: ev.Provider, Usage: newWireUsage(ev.Usage)})
+		}
+		if outputErr != nil {
+			return outputErr
 		}
 	}
 	return nil
@@ -197,12 +206,15 @@ func streamPlain(ctx context.Context, cmd *cobra.Command, sess *session.Session,
 			fmt.Fprintf(cmd.ErrOrStderr(), "yonderllm: %s\n", ev.Notice)
 		}
 		if ev.Delta != "" {
-			fmt.Fprint(out, ev.Delta)
+			if _, err := fmt.Fprint(out, ev.Delta); err != nil {
+				return err
+			}
 			wrote = true
 		}
 	}
 	if wrote {
-		fmt.Fprintln(out)
+		_, err := fmt.Fprintln(out)
+		return err
 	}
 	return nil
 }

@@ -61,7 +61,9 @@ yonderllm -p gemini ask "summarise the CAP theorem"`,
 					fmt.Fprintf(cmd.ErrOrStderr(), "yonderllm: %s\n", ev.Notice)
 				}
 				if ev.Delta != "" {
-					fmt.Fprint(out, ev.Delta)
+					if _, err := fmt.Fprint(out, ev.Delta); err != nil {
+						return err
+					}
 					wrote = true
 				}
 			}
@@ -69,7 +71,8 @@ yonderllm -p gemini ask "summarise the CAP theorem"`,
 			// Providers rarely end on a newline, and a shell prompt that
 			// starts mid-line looks like a bug.
 			if wrote {
-				fmt.Fprintln(out)
+				_, err := fmt.Fprintln(out)
+				return err
 			}
 			return nil
 		},
