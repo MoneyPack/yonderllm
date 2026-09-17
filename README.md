@@ -43,13 +43,15 @@ subcommand for when you want an answer without a session.
 Requires Go 1.27 or newer.
 
 ```sh
-go install yonderllm/cmd/yonderllm@latest
+git clone https://github.com/MoneyPack/yonderllm.git
+cd yonderllm
+go build -o bin/yonderllm ./cmd/yonderllm
 ```
 
 Or build from a clone:
 
 ```sh
-git clone <repo> yonderllm
+git clone https://github.com/MoneyPack/yonderllm.git
 cd yonderllm
 go build -o bin/yonderllm ./cmd/yonderllm
 ```
@@ -89,6 +91,10 @@ yonderllm completion powershell | Out-String | Invoke-Expression
 ---
 
 ## Quick start
+
+Detailed guides: [installation](docs/INSTALL.md), [providers](docs/PROVIDERS.md),
+[troubleshooting](docs/TROUBLESHOOTING.md), [scripting](docs/SCRIPTING.md),
+[safety](docs/SAFETY.md), and [development](docs/DEVELOPMENT.md).
 
 Set one API key and go. Groq's free tier needs no card:
 
