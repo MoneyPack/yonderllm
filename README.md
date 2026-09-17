@@ -54,6 +54,7 @@ Or build from a clone:
 ```sh
 git clone https://github.com/MoneyPack/yonderllm.git
 cd yonderllm
+mkdir -p bin
 go build -o bin/yonderllm ./cmd/yonderllm
 ```
 
