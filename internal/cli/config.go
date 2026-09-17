@@ -170,6 +170,9 @@ func writeConfigTable(w io.Writer, cfg config.Config, override string) error {
 	fmt.Fprintf(w, "mode         %s\n", cfg.Mode)
 	fmt.Fprintf(w, "max tokens   %d\n", cfg.MaxTokens)
 	fmt.Fprintf(w, "daily cap    %s\n", capLabel(cfg.DailyCap))
+	fmt.Fprintf(w, "retries      %d (backoff %d ms)\n", cfg.RetryAttempts, cfg.RetryBackoffMS)
+	fmt.Fprintf(w, "timeout      %d seconds (0 disables)\n", cfg.RequestTimeoutSeconds)
+	fmt.Fprintf(w, "run output   %s\n", cfg.OutputFormat)
 	fmt.Fprintf(w, "fallbacks    %s\n", orDash(strings.Join(cfg.Fallbacks, ", ")))
 
 	if len(cfg.Providers) == 0 {
@@ -215,15 +218,19 @@ func writeConfigJSON(w io.Writer, cfg config.Config, override string) error {
 	}
 
 	out := wireConfig{
-		ConfigFile:   path,
-		ConfigSource: source,
-		Provider:     cfg.Provider,
-		Model:        cfg.Providers[cfg.Provider].Model,
-		Mode:         cfg.Mode,
-		MaxTokens:    cfg.MaxTokens,
-		DailyCap:     cfg.DailyCap,
-		Fallbacks:    fallbacks,
-		Providers:    providers,
+		ConfigFile:            path,
+		ConfigSource:          source,
+		Provider:              cfg.Provider,
+		Model:                 cfg.Providers[cfg.Provider].Model,
+		Mode:                  cfg.Mode,
+		MaxTokens:             cfg.MaxTokens,
+		DailyCap:              cfg.DailyCap,
+		RetryAttempts:         cfg.RetryAttempts,
+		RetryBackoffMS:        cfg.RetryBackoffMS,
+		RequestTimeoutSeconds: cfg.RequestTimeoutSeconds,
+		OutputFormat:          cfg.OutputFormat,
+		Fallbacks:             fallbacks,
+		Providers:             providers,
 	}
 
 	enc := json.NewEncoder(w)
@@ -236,15 +243,19 @@ func writeConfigJSON(w io.Writer, cfg config.Config, override string) error {
 // stable while the internal struct evolves — and so no unexported key field is
 // ever within reach of the encoder.
 type wireConfig struct {
-	ConfigFile   string               `json:"config_file"`
-	ConfigSource string               `json:"config_source"`
-	Provider     string               `json:"provider"`
-	Model        string               `json:"model,omitempty"`
-	Mode         string               `json:"mode"`
-	MaxTokens    int                  `json:"max_tokens"`
-	DailyCap     int                  `json:"daily_cap"`
-	Fallbacks    []string             `json:"fallbacks"`
-	Providers    []wireConfigProvider `json:"providers"`
+	RetryAttempts         int                  `json:"retry_attempts"`
+	RetryBackoffMS        int                  `json:"retry_backoff_ms"`
+	RequestTimeoutSeconds int                  `json:"request_timeout_seconds"`
+	OutputFormat          string               `json:"output_format"`
+	ConfigFile            string               `json:"config_file"`
+	ConfigSource          string               `json:"config_source"`
+	Provider              string               `json:"provider"`
+	Model                 string               `json:"model,omitempty"`
+	Mode                  string               `json:"mode"`
+	MaxTokens             int                  `json:"max_tokens"`
+	DailyCap              int                  `json:"daily_cap"`
+	Fallbacks             []string             `json:"fallbacks"`
+	Providers             []wireConfigProvider `json:"providers"`
 }
 
 type wireConfigProvider struct {
@@ -344,6 +355,14 @@ max_tokens = %d
 
 # Cap on requests per day, to protect a free tier. Set to 0 for no cap.
 daily_cap = %d
+
+# Automatic retry is opt-in, before any output/tool calls, for quota/5xx only.
+retry_attempts = 0
+retry_backoff_ms = 500
+# Whole-exchange deadline; 0 disables it.
+request_timeout_seconds = 0
+# Default for run; --json=false overrides it. ask always prints text.
+output_format = "text"
 
 [providers.groq]
 base_url    = "https://api.groq.com/openai/v1"

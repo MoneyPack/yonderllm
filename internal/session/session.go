@@ -7,6 +7,7 @@ import (
 	"iter"
 	"slices"
 	"sort"
+	"time"
 
 	"yonderllm/internal/config"
 	"yonderllm/internal/provider"
@@ -302,6 +303,11 @@ func (s *Session) Retry(ctx context.Context) iter.Seq2[Event, error] {
 
 func (s *Session) exchange(ctx context.Context, prompt string, retry bool) iter.Seq2[Event, error] {
 	return func(yield func(Event, error) bool) {
+		if s.cfg.RequestTimeoutSeconds > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(s.cfg.RequestTimeoutSeconds)*time.Second)
+			defer cancel()
+		}
 		if retry {
 			if err := s.CanRetry(); err != nil {
 				yield(Event{}, err)
@@ -432,6 +438,28 @@ func (s *Session) round(ctx context.Context, candidates []string, tools []provid
 		}
 
 		res, err := s.streamOne(ctx, name, tools, yield)
+		for attempt := 0; attempt < s.cfg.RetryAttempts && res.reply == "" && len(res.calls) == 0 && (errors.Is(err, provider.ErrUnavailable) || errors.Is(err, provider.ErrQuota)); attempt++ {
+			delay := time.Duration(s.cfg.RetryBackoffMS) * time.Millisecond
+			var quota *provider.QuotaError
+			if errors.As(err, &quota) && quota.RetryAfter > delay {
+				delay = quota.RetryAfter
+			}
+			// Long provider hints fall through to another provider instead of parking the UI.
+			if delay > 30*time.Second {
+				break
+			}
+			if !yield(Event{Provider: name, Notice: fmt.Sprintf("retrying %s in %s (%d/%d)", name, delay, attempt+1, s.cfg.RetryAttempts)}, nil) {
+				return res, errStopped
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return res, ctx.Err()
+			case <-timer.C:
+			}
+			res, err = s.streamOne(ctx, name, tools, yield)
+		}
 		if err != nil && res.reply != "" {
 			return res, fmt.Errorf("%s: response interrupted after partial output: %w", name, err)
 		}

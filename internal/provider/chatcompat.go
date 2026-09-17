@@ -568,6 +568,11 @@ func (p *ChatCompat) redactMessage(message string) string {
 	if p.apiKey != "" {
 		message = strings.ReplaceAll(message, p.apiKey, "[redacted]")
 	}
+	for _, value := range p.extraHeaders {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, "[redacted]")
+		}
+	}
 	return redactKeyish(message)
 }
 

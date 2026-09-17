@@ -36,7 +36,9 @@ type ProviderConfig struct {
 	Model string `toml:"model"`
 	// APIKeyEnv names the environment variable holding the key. Naming the
 	// variable rather than the key keeps secrets out of the config file.
-	APIKeyEnv string `toml:"api_key_env"`
+	APIKeyEnv         string            `toml:"api_key_env"`
+	OmitStreamOptions bool              `toml:"omit_stream_options"`
+	HeaderEnv         map[string]string `toml:"header_env"`
 
 	// apiKey is resolved at load time and is never serialized.
 	apiKey string
@@ -71,7 +73,11 @@ type Config struct {
 	// MaxTokens caps output tokens per request.
 	MaxTokens int `toml:"max_tokens"`
 	// DailyCap limits requests per day. Zero disables the cap.
-	DailyCap int `toml:"daily_cap"`
+	DailyCap              int    `toml:"daily_cap"`
+	RetryAttempts         int    `toml:"retry_attempts"`
+	RetryBackoffMS        int    `toml:"retry_backoff_ms"`
+	RequestTimeoutSeconds int    `toml:"request_timeout_seconds"`
+	OutputFormat          string `toml:"output_format"`
 	// Providers holds per-provider settings, keyed by provider name.
 	Providers map[string]ProviderConfig `toml:"providers"`
 }
@@ -80,11 +86,13 @@ type Config struct {
 // providers registered, before any file or environment is read.
 func defaults() Config {
 	return Config{
-		Provider:  DefaultProvider,
-		Fallbacks: []string{"gemini", "openrouter"},
-		Mode:      DefaultMode,
-		MaxTokens: DefaultMaxTokens,
-		DailyCap:  DefaultDailyCap,
+		Provider:       DefaultProvider,
+		Fallbacks:      []string{"gemini", "openrouter"},
+		Mode:           DefaultMode,
+		MaxTokens:      DefaultMaxTokens,
+		DailyCap:       DefaultDailyCap,
+		RetryBackoffMS: 500,
+		OutputFormat:   "text",
 		Providers: map[string]ProviderConfig{
 			"groq": {
 				BaseURL:   "https://api.groq.com/openai/v1",
@@ -176,7 +184,8 @@ func validateFilePermissions(path string) error {
 // model does not erase the built-in base URL.
 func mergeTOML(cfg *Config, data []byte) error {
 	var file Config
-	if _, err := toml.Decode(string(data), &file); err != nil {
+	md, err := toml.Decode(string(data), &file)
+	if err != nil {
 		return err
 	}
 
@@ -189,15 +198,33 @@ func mergeTOML(cfg *Config, data []byte) error {
 	if file.Mode != "" {
 		cfg.Mode = file.Mode
 	}
-	if file.MaxTokens != 0 {
+	if md.IsDefined("max_tokens") {
 		cfg.MaxTokens = file.MaxTokens
 	}
-	if file.DailyCap != 0 {
+	if md.IsDefined("daily_cap") {
 		cfg.DailyCap = file.DailyCap
+	}
+	if md.IsDefined("retry_attempts") {
+		cfg.RetryAttempts = file.RetryAttempts
+	}
+	if md.IsDefined("retry_backoff_ms") {
+		cfg.RetryBackoffMS = file.RetryBackoffMS
+	}
+	if md.IsDefined("request_timeout_seconds") {
+		cfg.RequestTimeoutSeconds = file.RequestTimeoutSeconds
+	}
+	if md.IsDefined("output_format") {
+		cfg.OutputFormat = file.OutputFormat
 	}
 
 	for name, fp := range file.Providers {
 		base := cfg.Providers[name]
+		if md.IsDefined("providers", name, "omit_stream_options") {
+			base.OmitStreamOptions = fp.OmitStreamOptions
+		}
+		if fp.HeaderEnv != nil {
+			base.HeaderEnv = fp.HeaderEnv
+		}
 		if fp.BaseURL != "" {
 			base.BaseURL = fp.BaseURL
 		}
@@ -253,12 +280,29 @@ func (c Config) Validate() error {
 	if c.DailyCap < 0 {
 		return fmt.Errorf("daily_cap must not be negative, got %d", c.DailyCap)
 	}
+	if c.RetryAttempts < 0 || c.RetryAttempts > 3 {
+		return fmt.Errorf("retry_attempts must be between 0 and 3")
+	}
+	if c.RetryBackoffMS < 0 || c.RetryBackoffMS > 30000 {
+		return fmt.Errorf("retry_backoff_ms must be between 0 and 30000")
+	}
+	if c.RequestTimeoutSeconds < 0 || c.RequestTimeoutSeconds > 3600 {
+		return fmt.Errorf("request_timeout_seconds must be between 0 and 3600")
+	}
+	if c.OutputFormat != "" && c.OutputFormat != "text" && c.OutputFormat != "json" {
+		return fmt.Errorf("output_format must be text or json")
+	}
 	for _, name := range c.Fallbacks {
 		if _, ok := c.Providers[name]; !ok {
 			return fmt.Errorf("fallback provider %q is not configured", name)
 		}
 	}
 	for name, p := range c.Providers {
+		for header, env := range p.HeaderEnv {
+			if !strings.HasPrefix(strings.ToLower(header), "x-") || strings.ContainsAny(header, " \t\r\n:") || env == "" || strings.ContainsAny(env, "=\r\n ") {
+				return fmt.Errorf("provider %q header_env requires X- headers and environment variable names", name)
+			}
+		}
 		if err := validateBaseURL(name, p.BaseURL); err != nil {
 			return err
 		}
@@ -281,9 +325,11 @@ func validateBaseURL(name, raw string) error {
 // provider removed from the fallback positions so it is never tried twice.
 func (c Config) Chain() []string {
 	chain := []string{c.Provider}
+	seen := map[string]bool{c.Provider: true}
 	for _, name := range c.Fallbacks {
-		if name != c.Provider {
+		if !seen[name] {
 			chain = append(chain, name)
+			seen[name] = true
 		}
 	}
 	return chain

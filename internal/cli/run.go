@@ -36,6 +36,13 @@ echo "explain this" | yonderllm run --json
 yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !cmd.Flags().Changed("json") {
+				cfg, err := e.resolve()
+				if err != nil {
+					return err
+				}
+				asJSON = cfg.OutputFormat == "json"
+			}
 			// `run` with no prompt at a terminal is the spec's second
 			// door into the interactive session. --json rules it out:
 			// a caller asking for machine-readable events wants the
