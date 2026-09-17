@@ -122,6 +122,8 @@ func (m *model) retry(args []string) tea.Cmd {
 	m.pending = ""
 	m.answered = m.sess.Provider()
 	m.current = startRetry(m.sess, m.seq)
+	m.activity = "connecting"
+	m.spinner = 0
 	return waitForStream(m.current)
 }
 

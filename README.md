@@ -43,14 +43,18 @@ subcommand for when you want an answer without a session.
 Requires Go 1.27 or newer.
 
 ```sh
-go install yonderllm/cmd/yonderllm@latest
+git clone https://github.com/MoneyPack/yonderllm.git
+cd yonderllm
+mkdir -p bin
+go build -o bin/yonderllm ./cmd/yonderllm
 ```
 
 Or build from a clone:
 
 ```sh
-git clone <repo> yonderllm
+git clone https://github.com/MoneyPack/yonderllm.git
 cd yonderllm
+mkdir -p bin
 go build -o bin/yonderllm ./cmd/yonderllm
 ```
 
@@ -66,6 +70,7 @@ go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.1.0" \
 On Windows PowerShell:
 
 ```powershell
+New-Item -ItemType Directory -Force .\bin | Out-Null
 go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.1.0" `
   -o .\bin\yonderllm.exe .\cmd\yonderllm
 ```
@@ -89,6 +94,16 @@ yonderllm completion powershell | Out-String | Invoke-Expression
 ---
 
 ## Quick start
+
+Community: [contributing](CONTRIBUTING.md), [conduct](CODE_OF_CONDUCT.md),
+[security reporting](SECURITY.md), [issues](https://github.com/MoneyPack/yonderllm/issues).
+
+Detailed guides: [installation](docs/INSTALL.md), [providers](docs/PROVIDERS.md),
+[troubleshooting](docs/TROUBLESHOOTING.md), [scripting](docs/SCRIPTING.md),
+[safety](docs/SAFETY.md), and [development](docs/DEVELOPMENT.md).
+
+See [compatibility and versioning](docs/COMPATIBILITY.md) for the NDJSON contract
+and build metadata (`yonderllm version --json`).
 
 Set one API key and go. Groq's free tier needs no card:
 
@@ -142,7 +157,7 @@ stdin if there are none, so it composes with the rest of your shell.
 ```sh
 yonderllm ask "explain the difference between a mutex and a semaphore"
 
-git diff | yonderllm ask "write a commit message for this diff"
+git diff | yonderllm ask --stdin "write a commit message for this diff"
 
 yonderllm -p gemini ask "summarise the CAP theorem"
 ```

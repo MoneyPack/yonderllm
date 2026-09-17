@@ -373,7 +373,9 @@ func TestReadFileFollowsASymlinkInsideTheWorkspace(t *testing.T) {
 	write(t, dir, "real.txt", "milk\n")
 
 	link := filepath.Join(dir, "alias.txt")
-	if err := os.Symlink(filepath.Join(dir, "real.txt"), link); err != nil {
+	// os.Root follows relative links within the root, but rejects absolute
+	// targets even when their current destination happens to be inside it.
+	if err := os.Symlink("real.txt", link); err != nil {
 		t.Skipf("cannot create a symlink here: %v", err)
 	}
 
@@ -383,6 +385,17 @@ func TestReadFileFollowsASymlinkInsideTheWorkspace(t *testing.T) {
 	}
 	if got := string(data); got != "milk\n" {
 		t.Errorf("ReadFile returned %q, want %q", got, "milk\n")
+	}
+}
+
+func TestReadFileRefusesAnAbsoluteSymlinkToAnInternalFile(t *testing.T) {
+	w, dir := open(t, perm.Code)
+	write(t, dir, "real.txt", "milk\n")
+	if err := os.Symlink(filepath.Join(dir, "real.txt"), filepath.Join(dir, "absolute.txt")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if _, err := w.ReadFile("absolute.txt"); err == nil {
+		t.Fatal("absolute symlink was followed across the os.Root boundary")
 	}
 }
 

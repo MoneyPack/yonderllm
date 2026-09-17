@@ -25,7 +25,8 @@ type ChatCompat struct {
 	client  *http.Client
 	// extraHeaders are sent on every request. OpenRouter, for instance, asks
 	// callers to identify themselves via HTTP-Referer and X-Title.
-	extraHeaders map[string]string
+	extraHeaders      map[string]string
+	omitStreamOptions bool
 }
 
 // NewChatCompat builds an adapter. baseURL must already include any version
@@ -43,6 +44,10 @@ func NewChatCompat(name, baseURL, apiKey string, opts ...ChatOption) *ChatCompat
 	for _, opt := range opts {
 		opt(p)
 	}
+	// Copy the injected client instead of changing a caller-owned client.
+	client := *p.client
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	p.client = &client
 	return p
 }
 
@@ -58,6 +63,11 @@ func WithHTTPClient(c *http.Client) ChatOption {
 // WithHeader adds a header sent on every request.
 func WithHeader(key, value string) ChatOption {
 	return func(p *ChatCompat) { p.extraHeaders[key] = value }
+}
+
+// WithoutStreamOptions supports servers which reject the optional usage field.
+func WithoutStreamOptions() ChatOption {
+	return func(p *ChatCompat) { p.omitStreamOptions = true }
 }
 
 // Name reports the provider's stable identifier.
@@ -235,6 +245,9 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 			Stream:        true,
 			StreamOptions: &streamOptions{IncludeUsage: true},
 		}
+		if p.omitStreamOptions {
+			body.StreamOptions = nil
+		}
 		for _, t := range req.Tools {
 			body.Tools = append(body.Tools, wireTool{
 				Type: "function",
@@ -297,6 +310,7 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 		calls := newToolCallBuffer()
+		streamBytes := 0
 		finished := false
 		// flush emits whatever calls have been reassembled but not yet
 		// handed over. It runs at an explicit [DONE] without a finish
@@ -312,6 +326,11 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		}
 
 		for scanner.Scan() {
+			streamBytes += len(scanner.Bytes()) + 1
+			if streamBytes > 16*1024*1024 {
+				yield(Chunk{}, fmt.Errorf("%s: response stream exceeds the 16 MiB limit", p.name))
+				return
+			}
 			line := strings.TrimSpace(scanner.Text())
 			// Blank separators and comment/keep-alive lines carry no data.
 			if line == "" || strings.HasPrefix(line, ":") {
@@ -337,7 +356,7 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 					Message string `json:"message"`
 				}
 				_ = json.Unmarshal(frame.Error, &detail)
-				message := redactKeyish(strings.TrimSpace(detail.Message))
+				message := p.redactMessage(detail.Message)
 				if message == "" {
 					message = "provider reported an error in the response stream"
 				}
@@ -523,7 +542,7 @@ func (p *ChatCompat) statusError(resp *http.Response) error {
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(raw, &envelope)
-	message := redactKeyish(strings.TrimSpace(envelope.Error.Message))
+	message := p.redactMessage(envelope.Error.Message)
 
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
@@ -548,6 +567,19 @@ func (p *ChatCompat) statusError(resp *http.Response) error {
 	}
 
 	return fmt.Errorf("%s: %s (HTTP %d)", p.name, message, resp.StatusCode)
+}
+
+func (p *ChatCompat) redactMessage(message string) string {
+	message = strings.TrimSpace(message)
+	if p.apiKey != "" {
+		message = strings.ReplaceAll(message, p.apiKey, "[redacted]")
+	}
+	for _, value := range p.extraHeaders {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, "[redacted]")
+		}
+	}
+	return redactKeyish(message)
 }
 
 // retryAfter reads the standard hint, accepting both the seconds and the HTTP
@@ -575,9 +607,26 @@ func redactKeyish(s string) string {
 		trimmed := strings.Trim(f, `"'.,:;()[]`)
 		if trimmed != "" && looksLikeKey(trimmed) {
 			fields[i] = strings.ReplaceAll(f, trimmed, "[redacted]")
+			continue
+		}
+		for _, prefix := range []string{"sk-", "sk_", "gsk_", "AIza", "or-"} {
+			if at := strings.Index(f, prefix); at >= 0 {
+				end := at
+				for end < len(f) && isKeyChar(f[end]) {
+					end++
+				}
+				if end-at >= 16 {
+					fields[i] = f[:at] + "[redacted]" + f[end:]
+					break
+				}
+			}
 		}
 	}
 	return strings.Join(fields, " ")
+}
+
+func isKeyChar(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '-' || b == '_'
 }
 
 // looksLikeKey reports whether a token resembles an API key: anything carrying

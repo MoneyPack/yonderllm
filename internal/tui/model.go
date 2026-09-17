@@ -47,9 +47,11 @@ type model struct {
 	// current is the exchange in flight, valid only while busy. seq is
 	// incremented for every exchange started, so that packets from a
 	// cancelled stream can be recognised and dropped.
-	current stream
-	seq     int
-	busy    bool
+	current  stream
+	seq      int
+	busy     bool
+	activity string
+	spinner  int
 	// pending accumulates deltas for the reply being streamed. It is held
 	// separately from the transcript so that a partial reply can be
 	// discarded on cancellation without disturbing completed blocks.
@@ -307,6 +309,8 @@ func approvalBlock(req approvalRequest, outcome string) block {
 func (m *model) submit(prompt string) tea.Cmd {
 	m.seq++
 	m.busy = true
+	m.activity = "connecting"
+	m.spinner = 0
 	m.pending = ""
 	m.answered = m.sess.Provider()
 
@@ -319,6 +323,7 @@ func (m *model) submit(prompt string) tea.Cmd {
 // finish ends the exchange in flight, committing whatever text arrived.
 func (m *model) finish() {
 	m.busy = false
+	m.activity = ""
 	m.commitPending()
 	m.refresh()
 }

@@ -35,6 +35,58 @@ func TestStreamErrorDoesNotFlushPendingTool(t *testing.T) {
 	}
 }
 
+func TestStreamErrorRedactsCredentialFromDiagnostics(t *testing.T) {
+	secret := "sk-abcdefghijklmnopqrstuv"
+	srv, _ := sseServer(t, []string{frame(`{"error":{"message":"bad ` + secret + `"}}`)})
+	p := NewChatCompat("stub", srv.URL, "", WithHTTPClient(srv.Client()))
+	_, _, err := collect(p.Stream(context.Background(), Request{Model: "test"}))
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("diagnostic = %v", err)
+	}
+}
+
+func TestStreamErrorRedactsKeyEmbeddedInAssignment(t *testing.T) {
+	secret := "sk-abcdefghijklmnopqrstuv"
+	srv, _ := sseServer(t, []string{frame(`{"error":{"message":"credential=` + secret + `"}}`)})
+	p := NewChatCompat("stub", srv.URL, "different-key", WithHTTPClient(srv.Client()))
+	_, _, err := collect(p.Stream(context.Background(), Request{Model: "test"}))
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("embedded diagnostic = %v", err)
+	}
+}
+
+func TestCompatibilityCanOmitStreamOptions(t *testing.T) {
+	srv, seen := sseServer(t, []string{"data: [DONE]\n\n"})
+	p := NewChatCompat("strict", srv.URL, "", WithoutStreamOptions())
+	_, _, err := collect(p.Stream(context.Background(), Request{Model: "tiny"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen.StreamOptions != nil {
+		t.Fatal("strict server received stream_options")
+	}
+}
+
+func TestStreamHasAnAggregateByteLimit(t *testing.T) {
+	// Every individual frame fits the scanner limit, but the response does not.
+	frames := make([]string, 65)
+	for i := range frames {
+		frames[i] = frame(`{"choices":[{"delta":{"content":"` + strings.Repeat("x", 256*1024) + `"}}]}`)
+	}
+	frames = append(frames, "data: [DONE]\n\n")
+	srv, _ := sseServer(t, frames)
+	p := NewChatCompat("stub", srv.URL, "")
+	var got error
+	for _, err := range p.Stream(context.Background(), Request{Model: "tiny"}) {
+		if err != nil {
+			got = err
+		}
+	}
+	if got == nil || !strings.Contains(got.Error(), "limit") {
+		t.Fatalf("aggregate limit: %v", got)
+	}
+}
+
 func TestStreamUnexpectedEOFDoesNotFlushTools(t *testing.T) {
 	srv, _ := sseServer(t, []string{frame(`{"choices":[{"delta":{"content":"partial","tool_calls":[{"index":0,"id":"call","function":{"name":"write","arguments":"{}"}}]}}]}`)})
 	p := NewChatCompat("stub", srv.URL, "", WithHTTPClient(srv.Client()))

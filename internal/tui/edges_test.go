@@ -192,6 +192,20 @@ func TestFooterHintsMatchTheCurrentState(t *testing.T) {
 	}
 }
 
+func TestBusyFooterShowsActivityPhase(t *testing.T) {
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m.width = 120
+	m.busy = true
+
+	for _, phase := range []string{"connecting", "streaming", "running read"} {
+		m.activity = phase
+		got := m.footer()
+		if !strings.Contains(got, phase) {
+			t.Errorf("busy footer %q does not show phase %q", got, phase)
+		}
+	}
+}
+
 // A narrow window must not push the input off the screen, so the footer is cut
 // to the width rather than wrapped onto a second line.
 func TestFooterIsCutToTheWindowWidth(t *testing.T) {

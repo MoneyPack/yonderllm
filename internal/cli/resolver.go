@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"sync"
 
 	"yonderllm/internal/config"
@@ -59,7 +60,14 @@ func newResolver(cfg config.Config) session.Resolver {
 		// chat-completions dialect, so one adapter covers them all. A
 		// backend that does not fit gets its own constructor here, and
 		// nothing outside this switch has to change.
-		p := provider.NewChatCompat(name, pc.BaseURL, pc.APIKey())
+		opts := []provider.ChatOption{}
+		for header, env := range pc.HeaderEnv {
+			opts = append(opts, provider.WithHeader(header, os.Getenv(env)))
+		}
+		if pc.OmitStreamOptions {
+			opts = append(opts, provider.WithoutStreamOptions())
+		}
+		p := provider.NewChatCompat(name, pc.BaseURL, pc.APIKey(), opts...)
 		cache[name] = p
 		return p, nil
 	}

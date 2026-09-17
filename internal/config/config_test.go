@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -227,6 +228,20 @@ func TestMalformedTOMLReportsPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("error should name the offending file %q, got: %v", path, err)
+	}
+}
+
+func TestLoadRejectsBroadConfigPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses ACLs rather than POSIX mode bits")
+	}
+	path := writeConfig(t, `provider = "groq"`)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "0600") {
+		t.Fatalf("permission error = %v", err)
 	}
 }
 

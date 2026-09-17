@@ -8,6 +8,7 @@ package tui
 import (
 	"context"
 	"iter"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -93,10 +94,16 @@ func startExchange(seq int, exchange func(context.Context) iter.Seq2[session.Eve
 // it behind a tight receive loop.
 func waitForStream(s stream) tea.Cmd {
 	return func() tea.Msg {
-		packet, ok := <-s.ch
-		if !ok {
-			return streamClosedMsg{seq: s.seq}
+		timer := time.NewTimer(300 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case packet, ok := <-s.ch:
+			if !ok {
+				return streamClosedMsg{seq: s.seq}
+			}
+			return streamEventMsg{seq: s.seq, packet: packet}
+		case <-timer.C:
+			return activityTickMsg{seq: s.seq}
 		}
-		return streamEventMsg{seq: s.seq, packet: packet}
 	}
 }

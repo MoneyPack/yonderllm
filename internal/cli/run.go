@@ -18,6 +18,7 @@ import (
 // newline-delimited event stream that mirrors [session.Event] one for one.
 func newRunCmd(e *env) *cobra.Command {
 	var asJSON bool
+	var appendStdin bool
 
 	cmd := &cobra.Command{
 		Use:   "run [prompt]",
@@ -36,15 +37,22 @@ echo "explain this" | yonderllm run --json
 yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !cmd.Flags().Changed("json") {
+				cfg, err := e.resolve()
+				if err != nil {
+					return err
+				}
+				asJSON = cfg.OutputFormat == "json"
+			}
 			// `run` with no prompt at a terminal is the spec's second
 			// door into the interactive session. --json rules it out:
 			// a caller asking for machine-readable events wants the
 			// stdin read to fail loudly, not a full-screen interface.
-			if len(args) == 0 && !asJSON && interactiveStdin(cmd.InOrStdin()) {
+			if len(args) == 0 && !asJSON && !appendStdin && interactiveStdin(cmd.InOrStdin()) {
 				return e.runTUI()
 			}
 
-			prompt, err := readPrompt(cmd.InOrStdin(), args)
+			prompt, err := readPromptWithContext(cmd.InOrStdin(), args, appendStdin)
 			if err != nil {
 				return err
 			}
@@ -65,6 +73,7 @@ yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 	}
 
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit newline-delimited JSON events instead of text")
+	cmd.Flags().BoolVar(&appendStdin, "stdin", false, "append piped stdin to the prompt argument")
 	return cmd
 }
 
@@ -76,14 +85,15 @@ yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 // added so a consumer can switch on a single key instead of inferring the kind
 // from which fields happen to be present.
 type wireEvent struct {
-	Type     string     `json:"type"`
-	Delta    string     `json:"delta,omitempty"`
-	Notice   string     `json:"notice,omitempty"`
-	Provider string     `json:"provider,omitempty"`
-	Model    string     `json:"model,omitempty"`
-	Tool     *wireTool  `json:"tool,omitempty"`
-	Error    string     `json:"error,omitempty"`
-	Usage    *wireUsage `json:"usage,omitempty"`
+	SchemaVersion int        `json:"schema_version"`
+	Type          string     `json:"type"`
+	Delta         string     `json:"delta,omitempty"`
+	Notice        string     `json:"notice,omitempty"`
+	Provider      string     `json:"provider,omitempty"`
+	Model         string     `json:"model,omitempty"`
+	Tool          *wireTool  `json:"tool,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	Usage         *wireUsage `json:"usage,omitempty"`
 }
 
 // wireTool describes one tool invocation.
@@ -143,19 +153,24 @@ func newWireUsage(u *provider.Usage) *wireUsage {
 func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, prompt string) error {
 	enc := json.NewEncoder(cmd.OutOrStdout())
 
+	var outputErr error
 	emit := func(ev wireEvent) {
+		ev.SchemaVersion = 1
 		ev.Model = sess.Model()
 		if ev.Provider == "" {
 			ev.Provider = sess.Provider()
 		}
-		// An encode failure means stdout is gone; there is nowhere left
-		// to report it, and the exchange itself still succeeded.
-		_ = enc.Encode(ev)
+		if outputErr == nil {
+			outputErr = enc.Encode(ev)
+		}
 	}
 
 	for ev, err := range sess.Ask(ctx, prompt) {
 		if err != nil {
 			emit(wireEvent{Type: "error", Error: err.Error()})
+			if outputErr != nil {
+				return outputErr
+			}
 			return err
 		}
 		switch {
@@ -169,6 +184,9 @@ func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, 
 		}
 		if ev.Done {
 			emit(wireEvent{Type: "done", Provider: ev.Provider, Usage: newWireUsage(ev.Usage)})
+		}
+		if outputErr != nil {
+			return outputErr
 		}
 	}
 	return nil
@@ -190,12 +208,15 @@ func streamPlain(ctx context.Context, cmd *cobra.Command, sess *session.Session,
 			fmt.Fprintf(cmd.ErrOrStderr(), "yonderllm: %s\n", ev.Notice)
 		}
 		if ev.Delta != "" {
-			fmt.Fprint(out, ev.Delta)
+			if _, err := fmt.Fprint(out, ev.Delta); err != nil {
+				return err
+			}
 			wrote = true
 		}
 	}
 	if wrote {
-		fmt.Fprintln(out)
+		_, err := fmt.Fprintln(out)
+		return err
 	}
 	return nil
 }
