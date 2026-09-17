@@ -43,6 +43,10 @@ func NewChatCompat(name, baseURL, apiKey string, opts ...ChatOption) *ChatCompat
 	for _, opt := range opts {
 		opt(p)
 	}
+	// Copy the injected client instead of changing a caller-owned client.
+	client := *p.client
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	p.client = &client
 	return p
 }
 
@@ -337,7 +341,7 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 					Message string `json:"message"`
 				}
 				_ = json.Unmarshal(frame.Error, &detail)
-				message := redactKeyish(strings.TrimSpace(detail.Message))
+				message := p.redactMessage(detail.Message)
 				if message == "" {
 					message = "provider reported an error in the response stream"
 				}
@@ -523,7 +527,7 @@ func (p *ChatCompat) statusError(resp *http.Response) error {
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(raw, &envelope)
-	message := redactKeyish(strings.TrimSpace(envelope.Error.Message))
+	message := p.redactMessage(envelope.Error.Message)
 
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
@@ -548,6 +552,14 @@ func (p *ChatCompat) statusError(resp *http.Response) error {
 	}
 
 	return fmt.Errorf("%s: %s (HTTP %d)", p.name, message, resp.StatusCode)
+}
+
+func (p *ChatCompat) redactMessage(message string) string {
+	message = strings.TrimSpace(message)
+	if p.apiKey != "" {
+		message = strings.ReplaceAll(message, p.apiKey, "[redacted]")
+	}
+	return redactKeyish(message)
 }
 
 // retryAfter reads the standard hint, accepting both the seconds and the HTTP

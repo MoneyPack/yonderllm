@@ -8,8 +8,10 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -133,6 +135,9 @@ func Load(path string) (Config, error) {
 		data, err := os.ReadFile(path)
 		switch {
 		case err == nil:
+			if err := validateFilePermissions(path); err != nil {
+				return Config{}, err
+			}
 			if err := mergeTOML(&cfg, data); err != nil {
 				return Config{}, fmt.Errorf("parsing %s: %w", path, err)
 			}
@@ -150,6 +155,20 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func validateFilePermissions(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("checking config permissions: %w", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("config file %s is accessible to group or other users; set permissions to 0600", path)
+	}
+	return nil
 }
 
 // mergeTOML decodes data over cfg. Absent keys keep their existing value, and
@@ -238,6 +257,22 @@ func (c Config) Validate() error {
 		if _, ok := c.Providers[name]; !ok {
 			return fmt.Errorf("fallback provider %q is not configured", name)
 		}
+	}
+	for name, p := range c.Providers {
+		if err := validateBaseURL(name, p.BaseURL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateBaseURL(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("provider %q has invalid base_url: expected an http or https URL", name)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("provider %q base_url must not contain credentials, query parameters, or fragments", name)
 	}
 	return nil
 }

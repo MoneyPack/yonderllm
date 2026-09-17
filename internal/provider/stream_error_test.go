@@ -35,6 +35,16 @@ func TestStreamErrorDoesNotFlushPendingTool(t *testing.T) {
 	}
 }
 
+func TestStreamErrorRedactsCredentialFromDiagnostics(t *testing.T) {
+	secret := "sk-abcdefghijklmnopqrstuv"
+	srv, _ := sseServer(t, []string{frame(`{"error":{"message":"bad ` + secret + `"}}`)})
+	p := NewChatCompat("stub", srv.URL, "", WithHTTPClient(srv.Client()))
+	_, _, err := collect(p.Stream(context.Background(), Request{Model: "test"}))
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("diagnostic = %v", err)
+	}
+}
+
 func TestStreamUnexpectedEOFDoesNotFlushTools(t *testing.T) {
 	srv, _ := sseServer(t, []string{frame(`{"choices":[{"delta":{"content":"partial","tool_calls":[{"index":0,"id":"call","function":{"name":"write","arguments":"{}"}}]}}]}`)})
 	p := NewChatCompat("stub", srv.URL, "", WithHTTPClient(srv.Client()))
