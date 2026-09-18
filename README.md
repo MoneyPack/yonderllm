@@ -1,21 +1,42 @@
 # yonderllm
 
-[![CI](https://github.com/MoneyPackk/yonderllm/actions/workflows/ci.yml/badge.svg)](https://github.com/MoneyPackk/yonderllm/actions/workflows/ci.yml)
+[![CI](https://github.com/MoneyPack/yonderllm/actions/workflows/ci.yml/badge.svg)](https://github.com/MoneyPack/yonderllm/actions/workflows/ci.yml)
 
-A terminal client for large language models that never runs one.
+## Your model lives yonder.
 
-Inference happens *yonder* — on a provider's hardware, over the network. Your
-machine draws the interface and shuttles bytes. Nothing is downloaded, nothing
-is quantised, nothing warms your lap. The result is a single static binary that
-starts instantly on a laptop, a Raspberry Pi, or a shell you SSH into, and that
-stays inside the free and near-free tiers of the providers it speaks to.
+**Bring a question. Stay in your terminal.**
 
+A terminal workspace for remote AI: explore an idea, understand a diff, and pick
+up a conversation where you left it.
+
+**[Download the preview](https://github.com/MoneyPack/yonderllm/releases/tag/v0.2.0-rc.1)**
+· [Quick start](#quick-start) · [Safety and control](docs/SAFETY.md)
+
+---
+
+### Room to think. Tools when you choose.
+
+Start with a conversation. Move into code or agent mode when the task calls for
+workspace tools. The provider, model, and permission mode stay visible as you work.
+
+- **Your terminal, your workflow.** Chat interactively or pipe a diff into a focused question.
+- **Remote intelligence, local simplicity.** One executable. No model weights or local inference runtime to install.
+- **A conversation you can return to.** Save, resume, and recover an interrupted answer with an explicit retry.
+
+```powershell
+# With SURPLUS_API_KEY set in your environment:
+yonderllm -p surplus -m qwen3-coder-next
 ```
-$ yonderllm
+
+Or give an everyday task a little help:
+
+```powershell
+git diff --staged | yonderllm -p surplus -m qwen3-coder-next ask --stdin "Explain this change in two bullets."
 ```
 
-That is the whole thing. Bare `yonderllm` opens the TUI. Everything else is a
-subcommand for when you want an answer without a session.
+Inference runs on your chosen provider. Its availability and pricing apply.
+Chat mode starts without filesystem or shell tools; see [the permission model](docs/SAFETY.md)
+before enabling workspace actions.
 
 ---
 
@@ -38,18 +59,24 @@ subcommand for when you want an answer without a session.
 
 ## Install
 
+### Download one executable
+
+The **[v0.2.0-rc.1 preview](https://github.com/MoneyPack/yonderllm/releases/tag/v0.2.0-rc.1)**
+includes Windows, Linux, and macOS builds for x86-64 and ARM64. No Go installation
+is needed. Download the matching binary and `SHA256SUMS.txt`; verification and
+platform instructions are on the release page.
+
+For Windows x86-64, start with
+**[yonderllm-windows-amd64.exe](https://github.com/MoneyPack/yonderllm/releases/download/v0.2.0-rc.1/yonderllm-windows-amd64.exe)**.
+After verifying it, rename it to `yonderllm.exe` and place it on PATH, or launch
+it directly from its download folder.
+
+This is a release candidate for hands-on feedback. The
+[stable release](https://github.com/MoneyPack/yonderllm/releases/latest) remains available.
+
 ### From source
 
 Requires Go 1.27 or newer.
-
-```sh
-git clone https://github.com/MoneyPack/yonderllm.git
-cd yonderllm
-mkdir -p bin
-go build -o bin/yonderllm ./cmd/yonderllm
-```
-
-Or build from a clone:
 
 ```sh
 git clone https://github.com/MoneyPack/yonderllm.git
