@@ -17,6 +17,10 @@ effective configuration and key variable names, not key values.
 - **Redirect:** Configure the final API endpoint, not a redirecting gateway URL.
 - **Saving failed:** The answer may already be complete. Use `/save name` after
   correcting storage permissions; `/retry` will not repeat a completed answer.
+- **Output limit:** A notice explains when the provider reports hitting its
+  output-token cap. The partial answer stays in history. Ask to continue, or
+  increase `--max-tokens` on the next invocation. This is a completed, capped
+  response rather than a failed exchange, so `/retry` is not enabled.
 
 `/retry` waits for the worker to stop, retains the question and recorded tool
 results, and disables tools. It does not rerun writes or commands. An unmatched

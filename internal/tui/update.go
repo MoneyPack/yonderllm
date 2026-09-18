@@ -174,6 +174,7 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case packet.event.Notice != "":
+		m.commitPending()
 		m.append(block{kind: blockNotice, text: packet.event.Notice})
 		if packet.event.Provider != "" {
 			m.answered = packet.event.Provider

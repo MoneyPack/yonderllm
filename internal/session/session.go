@@ -395,6 +395,11 @@ func (s *Session) exchange(ctx context.Context, prompt string, retry bool) iter.
 						return
 					}
 				}
+				if res.finish == provider.FinishLength {
+					if !yield(Event{Provider: res.provider, Notice: "Answer reached the output limit. Ask to continue or increase --max-tokens."}, nil) {
+						return
+					}
+				}
 				yield(Event{Provider: res.provider, Done: true, Usage: total}, nil)
 				return
 			}
@@ -415,6 +420,7 @@ var errStopped = errors.New("session: consumer stopped")
 // asked for, and what the exchange cost. The provider is carried alongside so
 // that a failure can still say which adapter produced it.
 type roundResult struct {
+	finish   provider.FinishReason
 	provider string
 	reply    string
 	calls    []provider.ToolCall
@@ -531,6 +537,9 @@ func (s *Session) streamOne(ctx context.Context, name string, tools []provider.T
 		if chunk.Usage != nil {
 			u := *chunk.Usage
 			res.usage = &u
+		}
+		if chunk.Finish != provider.FinishNone {
+			res.finish = chunk.Finish
 		}
 		// The adapter reassembles fragmented calls, so anything arriving
 		// here is already whole and can simply be collected.
