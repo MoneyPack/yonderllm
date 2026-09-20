@@ -69,7 +69,11 @@ func (m model) runCommand(text string) (tea.Model, tea.Cmd) {
 
 	switch name {
 	case "/help":
-		m.append(block{kind: blockInfo, text: helpText})
+		text := helpText
+		if m.sessions == nil {
+			text = strings.ReplaceAll(text, "  /save <name>           save this conversation so you can resume it later\n", "")
+		}
+		m.append(block{kind: blockInfo, text: text})
 	case "/clear":
 		m.clearSession()
 	case "/usage":

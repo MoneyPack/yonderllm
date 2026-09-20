@@ -59,3 +59,19 @@ func TestRetryWaitsForWorkerAndRejectsInvalidArguments(t *testing.T) {
 	}
 	close(done)
 }
+
+func TestCancelledWorkerBlocksNewInputWithoutDiscardingIt(t *testing.T) {
+	for _, input := range []string{"new question", "/clear", "/model another", "/save snapshot"} {
+		t.Run(input, func(t *testing.T) {
+			m := newTestModel(t, &stubProvider{name: "stub"})
+			done := make(chan struct{})
+			m.current.done = done
+			m = typing(m, input)
+			m, cmd := step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			if cmd != nil || m.busy || m.input.Value() != input || !strings.Contains(transcript(m), "still stopping") {
+				t.Errorf("input raced cancelled worker or was lost: busy=%v input=%q", m.busy, m.input.Value())
+			}
+			close(done)
+		})
+	}
+}

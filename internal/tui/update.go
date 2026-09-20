@@ -131,6 +131,12 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		m.append(block{kind: blockNotice, text: "still answering — press ctrl+c to stop"})
 		return m, nil
 	}
+	// Cancellation releases the keyboard before the worker has necessarily
+	// released Session. Preserve input until all its reads/writes have ended.
+	if m.stopping() {
+		m.append(block{kind: blockNotice, text: "still stopping — send again once the exchange has stopped"})
+		return m, nil
+	}
 
 	m.input.Reset()
 
