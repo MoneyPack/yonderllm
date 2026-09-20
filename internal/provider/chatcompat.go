@@ -491,8 +491,17 @@ func (p *ChatCompat) Models(ctx context.Context) ([]Model, error) {
 		return nil, p.statusError(resp)
 	}
 
+	// Catalogue responses cross the same untrusted boundary as streams.
+	const maxModelListBytes = 16 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxModelListBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s: reading model list: %w", p.name, err)
+	}
+	if len(raw) > maxModelListBytes {
+		return nil, fmt.Errorf("%s: model list exceeds %d bytes", p.name, maxModelListBytes)
+	}
 	var list modelList
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+	if err := json.Unmarshal(raw, &list); err != nil {
 		return nil, fmt.Errorf("%s: decoding model list: %w", p.name, err)
 	}
 

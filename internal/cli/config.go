@@ -68,7 +68,7 @@ func newConfigShowCmd(e *env) *cobra.Command {
 			if asJSON {
 				return writeConfigJSON(e.out, cfg, e.configPath)
 			}
-			return writeConfigTable(e.out, cfg, e.configPath)
+			return writeConfigTable(cmd.OutOrStdout(), cfg, e.configPath)
 		},
 	}
 
@@ -92,7 +92,7 @@ func newConfigPathCmd(e *env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(e.out, path)
+			fmt.Fprintln(cmd.OutOrStdout(), path)
 			if !fileExists(path) {
 				fmt.Fprintln(e.errOut, "note: this file does not exist yet; run \"yonderllm config init\" to create it")
 			}
@@ -135,7 +135,7 @@ func newConfigInitCmd(e *env) *cobra.Command {
 			if err := os.WriteFile(path, []byte(starterConfig()), 0o600); err != nil {
 				return fmt.Errorf("writing %s: %w", path, err)
 			}
-			fmt.Fprintf(e.out, "wrote %s\n", path)
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
 			return nil
 		},
 	}

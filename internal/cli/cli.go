@@ -18,10 +18,12 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 
 	"yonderllm/internal/config"
 	"yonderllm/internal/perm"
+	"yonderllm/internal/terminaltext"
 )
 
 // Version is the build identifier, overridable at link time with
@@ -200,7 +202,19 @@ func newRoot(e *env) *cobra.Command {
 // same shape and no subcommand has to remember to.
 func Execute(args []string, in io.Reader, out, errOut io.Writer) int {
 	e := &env{in: in, out: out, errOut: errOut}
+	// Only plain output to a terminal is escaped. Pipes/files and JSON keep
+	// their data contract; the TUI receives the original output handle.
+	if f, ok := out.(*os.File); ok && term.IsTerminal(f.Fd()) {
+		w := terminaltext.NewWriter(out)
+		out = w
+		defer w.Flush()
+	}
+	errWriter := terminaltext.NewWriter(errOut)
+	errOut = errWriter
+	defer errWriter.Flush()
 	root := newRoot(e)
+	root.SetOut(out)
+	root.SetErr(errOut)
 
 	// Cobra falls back to os.Args[1:] when SetArgs receives nil, which would
 	// make a no-argument Execute parse whatever flags the host process was

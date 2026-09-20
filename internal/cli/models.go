@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"yonderllm/internal/provider"
+	"yonderllm/internal/terminaltext"
 )
 
 // newModelsCmd builds the model catalogue command.
@@ -145,7 +146,7 @@ func writeModelsTable(cmd *cobra.Command, providerName, active string, models []
 			marker = "*"
 		}
 		fmt.Fprintf(w, "%s %s\t%s\t%s\t%s\t%s\n",
-			marker, m.ID, displayName(m), contextLabel(m.ContextWindow),
+			marker, terminaltext.Line(m.ID), terminaltext.Line(displayName(m)), contextLabel(m.ContextWindow),
 			priceLabel(m.Pricing), tierLabel(m.Tier()))
 	}
 	if err := w.Flush(); err != nil {
@@ -225,7 +226,7 @@ func writeModelsJSON(cmd *cobra.Command, providerName, active string, models []p
 		doc.Models = append(doc.Models, entry)
 	}
 
-	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc := json.NewEncoder(terminaltext.Raw(cmd.OutOrStdout()))
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
 }

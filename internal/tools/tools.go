@@ -251,10 +251,11 @@ func writeTool(policy perm.Policy, approver Approver) session.Tool {
 			}
 			defer ws.Close()
 
+			detail := change(ws, args.Path, args.Content)
 			ok, err := consent(ctx, policy, approver, Request{
 				Action: perm.Write,
 				Target: args.Path,
-				Detail: change(ws, args.Path, args.Content),
+				Detail: detail,
 			}, false)
 			if err != nil {
 				return "", err
@@ -263,6 +264,12 @@ func writeTool(policy perm.Policy, approver Approver) session.Tool {
 				return fmt.Sprintf("the user refused to write %s; the file is "+
 					"unchanged. Ask what they would prefer instead of trying "+
 					"again.", args.Path), nil
+			}
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			if change(ws, args.Path, args.Content) != detail {
+				return "", fmt.Errorf("file changed while awaiting approval; read it again before proposing a write")
 			}
 
 			if err := ws.WriteFile(args.Path, []byte(args.Content)); err != nil {

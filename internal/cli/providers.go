@@ -8,6 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"yonderllm/internal/terminaltext"
+
 	"yonderllm/internal/config"
 )
 
@@ -203,7 +205,7 @@ func writeProvidersJSON(cmd *cobra.Command, rows []providerRow) error {
 		})
 	}
 
-	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc := json.NewEncoder(terminaltext.Raw(cmd.OutOrStdout()))
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
 }
