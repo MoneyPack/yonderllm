@@ -83,6 +83,8 @@ type Event struct {
 	Tool *ToolRun
 	// Done marks the final event of a successful exchange.
 	Done bool
+	// Finish preserves the provider's final stop reason for internal consumers.
+	Finish provider.FinishReason
 	// Usage carries token totals, set on the final event when reported.
 	Usage *provider.Usage
 }
@@ -400,7 +402,7 @@ func (s *Session) exchange(ctx context.Context, prompt string, retry bool) iter.
 						return
 					}
 				}
-				yield(Event{Provider: res.provider, Done: true, Usage: total}, nil)
+				yield(Event{Provider: res.provider, Done: true, Finish: res.finish, Usage: total}, nil)
 				return
 			}
 
