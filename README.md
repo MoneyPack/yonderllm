@@ -852,3 +852,5 @@ No cgo, so every target cross-compiles from any host.
   without a test rewrite.
 - `SPEC.md` holds the goals, non-goals, and interface contracts. It is the
   document to change first when the design changes.
+
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/blazingscrubs-hub/yonderllm?utm_source=oss&utm_medium=github&utm_campaign=blazingscrubs-hub%2Fyonderllm&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
