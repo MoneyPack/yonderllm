@@ -43,8 +43,13 @@ Built-in reads and searches cap bytes consumed, including when a regular file
 grows after its size check. Known special files are refused by direct reads.
 Opening a path can still race replacement by a special file; portable protection
 against that race is not claimed. Writes recheck cancellation and the displayed
-diff after approval; this detects ordinary concurrent edits but is not an atomic
+content snapshot after approval; this detects ordinary concurrent edits but is not an atomic
 compare-and-swap or a defense against a hostile same-user process.
+
+Writes require a readable bounded text snapshot (or a confirmed missing file)
+before approval. Files that cannot be snapshotted must be handled manually.
+Affirmative approval is disabled in undersized terminals that hide request
+details; enlarge the terminal to approve, or deny the request.
 
 Commands have a one-second output-drain grace period after direct-child exit or
 cancellation, preventing inherited pipes from holding the session indefinitely.

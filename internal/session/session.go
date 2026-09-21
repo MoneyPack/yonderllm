@@ -85,6 +85,9 @@ type Event struct {
 	Done bool
 	// Finish preserves the provider's final stop reason for internal consumers.
 	Finish provider.FinishReason
+	// IgnoredToolCalls preserves requests refused on a tools-disabled final
+	// round for internal evaluators. They are never executed or persisted.
+	IgnoredToolCalls []provider.ToolCall
 	// Usage carries token totals, set on the final event when reported.
 	Usage *provider.Usage
 }
@@ -402,7 +405,7 @@ func (s *Session) exchange(ctx context.Context, prompt string, retry bool) iter.
 						return
 					}
 				}
-				yield(Event{Provider: res.provider, Done: true, Finish: res.finish, Usage: total}, nil)
+				yield(Event{Provider: res.provider, Done: true, Finish: res.finish, Usage: total, IgnoredToolCalls: res.calls}, nil)
 				return
 			}
 

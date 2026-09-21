@@ -18,6 +18,7 @@ import (
 	"yonderllm/internal/evaluation"
 	"yonderllm/internal/provider"
 	"yonderllm/internal/session"
+	"yonderllm/internal/terminaltext"
 )
 
 type report struct {
@@ -45,6 +46,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, out, stderr io.Writer) int {
+	errWriter := terminaltext.NewWriter(stderr)
+	stderr = errWriter
+	defer errWriter.Flush()
 	f := flag.NewFlagSet("yonder-eval", flag.ContinueOnError)
 	f.SetOutput(stderr)
 	live := f.Bool("live", false, "make billable provider requests (default: offline fixtures)")
@@ -99,7 +103,11 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) int {
 	if *budgetUSD > 0 {
 		pc := cfg.Providers[cfg.Provider]
 		priceCtx, cancel := context.WithTimeout(ctx, *timeout)
-		catalogue, err := provider.NewChatCompat(cfg.Provider, pc.BaseURL, pc.APIKey()).Models(priceCtx)
+		var options []provider.ChatOption
+		for header, env := range pc.HeaderEnv {
+			options = append(options, provider.WithHeader(header, os.Getenv(env)))
+		}
+		catalogue, err := provider.NewChatCompat(cfg.Provider, pc.BaseURL, pc.APIKey(), options...).Models(priceCtx)
 		cancel()
 		if err != nil {
 			fmt.Fprintln(stderr, "cannot check model pricing:", err)

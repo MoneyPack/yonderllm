@@ -34,7 +34,7 @@ an authorization boundary: tools and lower layers enforce policy.
 isolate processes or exclude all sensitive files inside the workspace. Reads
 cap actual bytes consumed and check regular-file type before/after open.
 Replacement with a special file during open needs deeper cross-platform
-verification. Writes recheck cancellation and the approval diff but are not
+verification. Writes recheck cancellation and the original content snapshot but are not
 transactional compare-and-swap; a hostile concurrent writer can still race.
 
 Commands use argv without implicit shell parsing, inherit environment, have

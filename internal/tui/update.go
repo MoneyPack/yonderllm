@@ -67,6 +67,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// cannot answer it by accident, and so that the answer is always one
 	// keystroke rather than a keystroke aimed at a hidden input.
 	if m.asking {
+		if allowsApproval(msg) && (!m.ready || m.height < headerHeight+footerHeight+inputHeight+minViewport || m.width < 20) {
+			return m, nil
+		}
 		return m, answerApproval(m.question, allowsApproval(msg))
 	}
 

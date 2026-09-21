@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,5 +49,34 @@ func TestWriteRechecksCancellationAndApprovalDiff(t *testing.T) {
 				t.Fatalf("overwrote unapproved content: %q", data)
 			}
 		})
+	}
+}
+
+func TestWriteDetectsEditsHiddenByDiffSummary(t *testing.T) {
+	t.Chdir(t.TempDir())
+	old := strings.Repeat("old\n", 1100)
+	edited := strings.Repeat("edited\n", 1100)
+	if err := os.WriteFile("file.txt", []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tool := writeTool(perm.New(perm.Code), func(context.Context, Request) bool {
+		if err := os.WriteFile("file.txt", []byte(edited), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	})
+	args, err := json.Marshal(map[string]string{"path": "file.txt", "content": strings.Repeat("new\n", 1100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Run(context.Background(), string(args)); err == nil {
+		t.Error("summary collision authorized stale write")
+	}
+	data, err := os.ReadFile("file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != edited {
+		t.Error("concurrent edit overwritten")
 	}
 }

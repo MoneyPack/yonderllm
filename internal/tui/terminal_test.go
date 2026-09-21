@@ -1,6 +1,7 @@
 package tui
 
 import (
+	tea "github.com/charmbracelet/bubbletea"
 	"strings"
 	"testing"
 
@@ -22,6 +23,26 @@ func TestUntrustedBlocksEscapeTerminalInstructions(t *testing.T) {
 		if b.text != malicious {
 			t.Fatal("render changed underlying data")
 		}
+	}
+}
+
+func TestHiddenApprovalCannotBeAccepted(t *testing.T) {
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m.resize(80, 8)
+	m, req, _ := asking(t, m, pendingApproval(perm.Write, "important.txt", "replace content"))
+	if strings.Contains(m.View(), "important.txt") {
+		t.Fatal("test requires hidden request")
+	}
+	_, cmd := step(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd != nil {
+		cmd()
+	}
+	select {
+	case allowed := <-req.reply:
+		if allowed {
+			t.Fatal("hidden approval accepted")
+		}
+	default:
 	}
 }
 

@@ -2,6 +2,7 @@ package evaluation
 
 import (
 	"context"
+	"iter"
 	"testing"
 	"time"
 
@@ -21,6 +22,48 @@ func TestFixtureSuite(t *testing.T) {
 			}
 			if report.FirstTokenMS == nil || report.TotalMS < *report.FirstTokenMS {
 				t.Fatalf("invalid latency measurements: %+v", report)
+			}
+		})
+	}
+}
+
+type scriptedProvider struct {
+	chunks []provider.Chunk
+	index  int
+}
+
+func (p *scriptedProvider) Name() string                                     { return "fixture" }
+func (p *scriptedProvider) Models(context.Context) ([]provider.Model, error) { return nil, nil }
+func (p *scriptedProvider) Stream(context.Context, provider.Request) iter.Seq2[provider.Chunk, error] {
+	return func(yield func(provider.Chunk, error) bool) {
+		chunk := p.chunks[p.index]
+		p.index++
+		yield(chunk, nil)
+	}
+}
+func TestFinalAnswerAndIgnoredToolCallsAreReportedHonestly(t *testing.T) {
+	c := Cases()[2]
+	call := provider.ToolCall{ID: "call", Name: "lookup", Arguments: `{"key":"color"}`}
+	for _, test := range []struct {
+		name   string
+		chunks []provider.Chunk
+		calls  int
+		answer string
+	}{
+		{"split answer", []provider.Chunk{{Delta: "am", Finish: provider.FinishTool, ToolCalls: []provider.ToolCall{call}}, {Delta: "ber", Finish: provider.FinishStop}}, 1, "ber"},
+		{"ignored sixth call", []provider.Chunk{
+			{Finish: provider.FinishTool, ToolCalls: []provider.ToolCall{call}}, {Finish: provider.FinishTool, ToolCalls: []provider.ToolCall{call}},
+			{Finish: provider.FinishTool, ToolCalls: []provider.ToolCall{call}}, {Finish: provider.FinishTool, ToolCalls: []provider.ToolCall{call}},
+			{Finish: provider.FinishTool, ToolCalls: []provider.ToolCall{call}}, {Finish: provider.FinishTool, ToolCalls: []provider.ToolCall{call}},
+		}, 6, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := &scriptedProvider{chunks: test.chunks}
+			cfg := config.Config{Provider: "fixture", MaxTokens: 256, Providers: map[string]config.ProviderConfig{"fixture": {Model: "fixture-v1"}}}
+			s := session.New(cfg, func(string) (provider.Provider, error) { return p, nil })
+			r := Run(context.Background(), s, c, time.Now)
+			if r.Passed || r.Answer != test.answer || len(r.ToolCalls) != test.calls {
+				t.Fatalf("misleading report: %+v", r)
 			}
 		})
 	}

@@ -12,13 +12,19 @@ providers through the real session coordinator. It needs no credentials,
 filesystem tools, user config, or external services. `go test ./...` exercises
 these cases in the existing CI matrix.
 
-## What suite 1 measures
+## What suite 2 measures
 
 - **Answers:** exact arithmetic and a structurally validated JSON instruction.
 - **Tool behavior:** exactly one lookup with validated arguments; a simulated
   denied write followed by an acknowledgement rather than another attempt.
 - **Latency:** time to first nonempty text delta, total exchange time, and a
   separate cancel-after-first-text probe measuring time until the iterator exits.
+
+Suite 2 scores the final assistant turn rather than concatenating text across
+tool rounds. Calls ignored on the tools-disabled last round remain in the report
+with `ignored: true` and fail tool correctness. These fixes change scoring from
+suite 1; compare like versions. Budget pricing lookup honors configured headers,
+and evaluation stderr escapes terminal controls.
 
 The fixture tools have no filesystem, process, or network side effects. The
 denied-write case evaluates how a model reacts to a refusal; it is not a test of
@@ -76,7 +82,7 @@ coding explanations and summaries, add versioned synthetic tasks plus a human
 rubric covering correctness, relevance, instruction following, and incomplete
 answers. Review outputs blind to model identity where practical. Record rubric
 scores separately; keyword overlap alone is not a correctness measure. An
-automated judge would add cost and its own bias and is not part of suite 1.
+automated judge would add cost and its own bias and is not part of suite 2.
 
 Live-provider execution is opt-in and is not part of CI. No live quality or
 latency claims should be made from the offline fixture results.
@@ -95,7 +101,7 @@ This is a local token-cost guard, not a provider-side account spending cap.
 Pricing changes, unreported fees, and a provider ignoring token limits cannot
 be controlled locally. Leave a substantial margin below your spending limit.
 
-### Live smoke comparison, 2026-09-20
+### Historical suite-1 live smoke comparison, 2026-09-20
 
 Both Surplus `deepseek-v4-flash` and `openai-gpt-oss-120b` passed 4/4 cases,
 using 1,024 output tokens maximum per round and 60-second case timeouts.

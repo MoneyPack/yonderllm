@@ -131,6 +131,10 @@ func (m model) footer() string {
 	var hint string
 	switch {
 	case m.asking:
+		if m.height < headerHeight+footerHeight+inputHeight+minViewport || m.width < 20 {
+			hint = "enlarge to approve · n deny"
+			break
+		}
 		// The question holds every key, including ctrl+c, so naming the
 		// stop hint here would be a lie about what the terminal does.
 		hint = "y allow · anything else deny"

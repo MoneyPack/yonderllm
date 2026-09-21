@@ -90,8 +90,11 @@ boundaries. This is evidence of specific controls, not proof of complete safety.
   approval content. Natural-language spoofing remains possible.
 - Regular-file reads/searches now limit actual bytes, not merely stat size.
   Direct reads reject known special files and recheck the opened handle type.
-- Writes recheck cancellation and displayed diff after approval. This is a
-  best-effort stale-edit check, not atomic compare-and-swap.
+- Writes recheck cancellation and a full bounded content snapshot after approval.
+  A lossy diff summary is not used as identity. Unsnapshottable targets are
+  refused. This is a best-effort stale-edit check, not atomic compare-and-swap.
+- Undersized terminals disable affirmative approval while request details are
+  hidden; denial remains available.
 - Process output draining is bounded with `exec.Cmd.WaitDelay` (one second).
   Regression tests exercise a descendant holding pipes open and a running
   direct child stopped by a deadline. Descendant termination is not guaranteed.

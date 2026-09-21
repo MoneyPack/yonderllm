@@ -113,3 +113,27 @@ func TestLiveAgainstLocalHTTPProvider(t *testing.T) {
 		t.Fatal("credential in report")
 	}
 }
+
+func TestPricingUsesConfiguredHeadersAndEscapesErrors(t *testing.T) {
+	var sawHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHeader = r.Header.Get("X-Tenant") == "tenant"
+		w.WriteHeader(400)
+		fmt.Fprint(w, `{"error":{"message":"bad\u001b]52;c;payload\u0007"}}`)
+	}))
+	defer srv.Close()
+	t.Setenv("EVAL_TENANT", "tenant")
+	t.Setenv("YONDERLLM_PROVIDER", "")
+	t.Setenv("YONDERLLM_MODEL", "")
+	t.Setenv("YONDERLLM_MODE", "")
+	path := filepath.Join(t.TempDir(), "config.toml")
+	text := fmt.Sprintf("provider='local'\nfallbacks=[]\n[providers.local]\nbase_url=%q\nmodel='tiny'\napi_key_env=''\n[providers.local.header_env]\nX-Tenant='EVAL_TENANT'\n", srv.URL)
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--live", "--config", path, "--provider", "local", "--model", "tiny", "--budget-usd", "0.1"}, &out, &stderr)
+	if code != 2 || !sawHeader || strings.ContainsAny(stderr.String(), "\x1b\a") {
+		t.Fatalf("code=%d header=%v stderr=%q", code, sawHeader, stderr.String())
+	}
+}

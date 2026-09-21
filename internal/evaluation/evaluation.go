@@ -13,7 +13,7 @@ import (
 	"yonderllm/internal/session"
 )
 
-const SuiteVersion = "1"
+const SuiteVersion = "2"
 
 type Case struct {
 	ID       string `json:"id"`
@@ -36,6 +36,7 @@ type Call struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 	Error     string `json:"error,omitempty"`
+	Ignored   bool   `json:"ignored,omitempty"`
 }
 
 type Result struct {
@@ -118,8 +119,14 @@ func Run(ctx context.Context, s *session.Session, c Case, now func() time.Time) 
 		if e.Tool != nil && e.Tool.Finished {
 			r.ToolCalls = append(r.ToolCalls, Call{Name: e.Tool.Name, Arguments: e.Tool.Arguments, Error: e.Tool.Err})
 		}
+		if e.Tool != nil && !e.Tool.Finished {
+			answer.Reset()
+		}
 		if e.Done {
 			r.Completed, r.Finish, r.Usage = true, e.Finish, e.Usage
+			for _, call := range e.IgnoredToolCalls {
+				r.ToolCalls = append(r.ToolCalls, Call{Name: call.Name, Arguments: call.Arguments, Ignored: true})
+			}
 		}
 	}
 	r.TotalMS = float64(now().Sub(start)) / float64(time.Millisecond)
@@ -137,7 +144,7 @@ func judge(r *Result, c Case) {
 	r.ToolsPassed = len(r.ToolCalls) == 0 && c.Tool == ""
 	if c.Tool != "" && len(r.ToolCalls) == 1 {
 		call := r.ToolCalls[0]
-		r.ToolsPassed = call.Name == c.Tool && call.Error == ""
+		r.ToolsPassed = call.Name == c.Tool && call.Error == "" && !call.Ignored
 	}
 	r.Passed = r.Completed && r.Error == "" && r.AnswerPassed && r.ToolsPassed && (r.Finish == "" || r.Finish == provider.FinishStop)
 }
