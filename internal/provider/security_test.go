@@ -42,3 +42,14 @@ func TestProviderDoesNotFollowRedirectWithCredentials(t *testing.T) {
 		t.Fatalf("followed credentialed redirect: requests=%d err=%v", requests, err)
 	}
 }
+
+func TestModelsRejectsOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"` + strings.Repeat("x", 16<<20) + `"}]}`))
+	}))
+	defer srv.Close()
+	models, err := NewChatCompat("stub", srv.URL, "").Models(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "model list exceeds") || models != nil {
+		t.Fatalf("oversized catalogue accepted: count=%d err=%v", len(models), err)
+	}
+}

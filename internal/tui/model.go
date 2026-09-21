@@ -114,7 +114,7 @@ func newModelWithSessions(sess *session.Session, mode perm.Mode, approvals *Appr
 		approvals: approvals,
 		sessions:  sessions,
 	}
-	m.blocks = []block{{kind: blockInfo, text: m.greeting()}}
+	m.blocks = []block{{kind: blockInfo, tag: "welcome", text: m.greeting()}}
 	for _, msg := range sess.History().Turns() {
 		switch msg.Role {
 		case provider.RoleUser:
@@ -137,10 +137,27 @@ func newModelWithSessions(sess *session.Session, mode perm.Mode, approvals *Appr
 // model the session will actually use, because that is the fact a user is most
 // likely to be wrong about when they start typing.
 func (m model) greeting() string {
-	return fmt.Sprintf(
-		"Connected to %s (%s) in %s mode. Inference runs remotely; this machine only draws the session.\nType /help for commands.",
+	text := fmt.Sprintf(
+		"Using %s (%s) in %s mode. Inference runs remotely.\nType /help for commands.",
 		m.sess.Provider(), m.sess.Model(), m.mode,
 	)
+	if m.sessions != nil {
+		text += "\n/save <name> saves this conversation."
+	}
+	return text
+}
+
+// stopping is safe to query from the UI while the session worker unwinds.
+func (m model) stopping() bool {
+	if m.busy || m.current.done == nil {
+		return false
+	}
+	select {
+	case <-m.current.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // Init satisfies tea.Model.

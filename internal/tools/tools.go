@@ -21,6 +21,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -251,10 +252,15 @@ func writeTool(policy perm.Policy, approver Approver) session.Tool {
 			}
 			defer ws.Close()
 
+			original, readErr := ws.ReadFile(args.Path)
+			if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+				return "", fmt.Errorf("cannot snapshot file before approval: %w", readErr)
+			}
+			detail := changeFrom(original, readErr, args.Content)
 			ok, err := consent(ctx, policy, approver, Request{
 				Action: perm.Write,
 				Target: args.Path,
-				Detail: change(ws, args.Path, args.Content),
+				Detail: detail,
 			}, false)
 			if err != nil {
 				return "", err
@@ -263,6 +269,14 @@ func writeTool(policy perm.Policy, approver Approver) session.Tool {
 				return fmt.Sprintf("the user refused to write %s; the file is "+
 					"unchanged. Ask what they would prefer instead of trying "+
 					"again.", args.Path), nil
+			}
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			current, currentErr := ws.ReadFile(args.Path)
+			missingBefore, missingNow := errors.Is(readErr, fs.ErrNotExist), errors.Is(currentErr, fs.ErrNotExist)
+			if missingBefore != missingNow || (currentErr != nil && !missingNow) || !bytes.Equal(original, current) {
+				return "", fmt.Errorf("file changed while awaiting approval; read it again before proposing a write")
 			}
 
 			if err := ws.WriteFile(args.Path, []byte(args.Content)); err != nil {
@@ -390,6 +404,10 @@ func consent(ctx context.Context, policy perm.Policy, approver Approver, req Req
 // file and the other is a file about to be destroyed.
 func change(ws *workspace.Workspace, name, content string) string {
 	old, err := ws.ReadFile(name)
+	return changeFrom(old, err, content)
+}
+
+func changeFrom(old []byte, err error, content string) string {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return "this file does not exist yet; it would be created with " +

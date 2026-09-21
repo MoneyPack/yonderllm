@@ -19,6 +19,7 @@ package workspace
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -126,16 +127,48 @@ func (w *Workspace) ReadFile(name string) ([]byte, error) {
 	if info.IsDir() {
 		return nil, fmt.Errorf("workspace: read %s: is a directory", name)
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("workspace: read %s: not a regular file", name)
+	}
 	if info.Size() > maxFileBytes {
 		return nil, fmt.Errorf("workspace: read %s: file is larger than %d bytes", name, maxFileBytes)
 	}
 
-	data, err := w.root.ReadFile(rel)
+	data, err := w.readBounded(rel)
 	if err != nil {
 		return nil, readError(name, err)
 	}
 	if isBinary(data) {
 		return nil, fmt.Errorf("workspace: read %s: not a text file", name)
+	}
+	return data, nil
+}
+
+// readBounded checks the opened file too, and limits bytes actually consumed:
+// a stat size can be stale immediately when another process grows a file.
+func (w *Workspace) readBounded(rel string) ([]byte, error) {
+	f, err := w.root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
+	}
+	return readLimited(f)
+}
+
+func readLimited(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxFileBytes {
+		return nil, fmt.Errorf("file is larger than %d bytes", maxFileBytes)
 	}
 	return data, nil
 }
@@ -178,7 +211,7 @@ func (w *Workspace) Search(query string) ([]Match, error) {
 		if info, err := d.Info(); err != nil || info.Size() > maxFileBytes {
 			return nil
 		}
-		data, err := fs.ReadFile(fsys, path)
+		data, err := w.readBounded(path)
 		if err != nil || isBinary(data) {
 			return nil
 		}

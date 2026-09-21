@@ -24,3 +24,8 @@ CI job performs race checks; local CGO-disabled runs cannot substitute for it.
 Package boundaries: provider handles wire protocols, session handles policy and
 history, config handles settings, tools/perm handle capabilities, and CLI/TUI
 handle presentation. Preserve cancellation and whole tool-result exchanges.
+
+The separate [evaluation runner](EVALUATION.md) uses offline fixtures by default;
+live model comparisons are explicit and excluded from CI. The current and
+prospective extension [threat model](security/workspace/kb/THREAT_MODEL.md)
+records verified controls, working-tree fixes, and open follow-up checks.

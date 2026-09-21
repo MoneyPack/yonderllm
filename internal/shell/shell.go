@@ -113,6 +113,9 @@ func (r *Runner) Run(ctx context.Context, args []string) (Result, error) {
 
 	out := &capped{}
 	cmd := exec.CommandContext(ctx, name, args[1:]...)
+	// Descendants may inherit output pipes after the direct child exits or is
+	// killed. Bound the wait for EOF rather than keeping the session stuck.
+	cmd.WaitDelay = time.Second
 	cmd.Dir = r.dir
 	// Nothing is on stdin. A command that prompts should see a closed input
 	// and give up, rather than block until the timeout kills it while the
@@ -129,6 +132,9 @@ func (r *Runner) Run(ctx context.Context, args []string) (Result, error) {
 	cmd.Env = os.Environ()
 
 	runErr := cmd.Run()
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		return Result{}, fmt.Errorf("shell: output pipes remained open after the command exited: %w", runErr)
+	}
 
 	// A command that never started leaves no process state behind, so there
 	// is no exit status to report and nothing to hand back as a result. That

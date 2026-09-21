@@ -3,9 +3,12 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/spf13/cobra"
 	"runtime"
 	"runtime/debug"
+
+	"github.com/spf13/cobra"
+
+	"yonderllm/internal/terminaltext"
 )
 
 // BuildCommit and BuildDate may be supplied with Go linker -X flags.
@@ -42,7 +45,7 @@ func newVersionCmd() *cobra.Command {
 			SchemaVersion int    `json:"schema_version"`
 		}{Version, commit, date, modified, runtime.Version(), runtime.GOOS + "/" + runtime.GOARCH, 1}
 		if asJSON {
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(info)
+			return json.NewEncoder(terminaltext.Raw(cmd.OutOrStdout())).Encode(info)
 		}
 		_, err := fmt.Fprintf(cmd.OutOrStdout(), "yonderllm %s\ncommit %s\nbuilt %s\n%s %s\nNDJSON schema 1\n", Version, orDash(commit), orDash(date), info.GoVersion, info.Platform)
 		return err

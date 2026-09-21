@@ -6,6 +6,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"yonderllm/internal/terminaltext"
 )
 
 // kind distinguishes the sorts of thing that can appear in the transcript.
@@ -51,6 +53,8 @@ type block struct {
 
 // render draws a block wrapped to width.
 func (b block) render(s styles, width int) string {
+	b.text = terminaltext.Text(b.text)
+	b.tag = terminaltext.Line(b.tag)
 	if width < 8 {
 		width = 8
 	}
@@ -76,9 +80,9 @@ func (b block) render(s styles, width int) string {
 		// model said.
 		return lipgloss.JoinVertical(lipgloss.Left, s.toolTag.Render("tool "+tag), s.muted.Render(body))
 	case blockNotice:
-		return s.notice.Render("· " + strings.TrimRight(b.text, "\n"))
+		return s.notice.Width(width).Render("· " + strings.TrimRight(b.text, "\n"))
 	case blockError:
-		return lipgloss.JoinVertical(lipgloss.Left, s.errorTag.Render("error"), s.errorTag.Render(strings.TrimRight(b.text, "\n")))
+		return lipgloss.JoinVertical(lipgloss.Left, s.errorTag.Render("error"), s.errorTag.Render(body))
 	case blockApproval:
 		tag := b.tag
 		if tag == "" {

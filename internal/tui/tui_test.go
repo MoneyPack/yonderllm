@@ -172,7 +172,7 @@ func TestNewModelGreets(t *testing.T) {
 		t.Errorf("starting block kind = %v, want blockInfo", m.blocks[0].kind)
 	}
 
-	for _, want := range []string{"stub", "stub-1", "chat", "Inference runs remotely"} {
+	for _, want := range []string{"stub", "stub-1", "chat", "Inference runs remotely", "/help"} {
 		if !strings.Contains(m.blocks[0].text, want) {
 			t.Errorf("greeting missing %q:\n%s", want, m.blocks[0].text)
 		}
@@ -240,6 +240,19 @@ func TestViewShowsBrandProviderAndFooter(t *testing.T) {
 	}
 	if strings.Contains(out, "ctrl+c stop") {
 		t.Errorf("asking footer still offers a key the question has taken:\n%s", out)
+	}
+}
+
+func TestHeaderKeepsModeVisibleWhenMetadataDoesNotFit(t *testing.T) {
+	m := newTestModel(t, &stubProvider{name: "stub"})
+	m.width = 20
+
+	out := m.header()
+	if !strings.Contains(out, "mode") || !strings.Contains(out, "chat") {
+		t.Errorf("narrow header lost permission mode:\n%s", out)
+	}
+	if strings.Contains(out, "provider") {
+		t.Errorf("narrow header kept metadata that cannot fit:\n%s", out)
 	}
 }
 

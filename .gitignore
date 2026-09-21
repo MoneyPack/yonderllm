@@ -30,3 +30,7 @@ go.work.sum
 *.swp
 .DS_Store
 Thumbs.db
+
+# Installed coding-agent skills are local; skills-lock.json records sources.
+/.agents/skills/
+/.claude/skills/

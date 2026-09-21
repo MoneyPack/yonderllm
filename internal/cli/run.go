@@ -9,6 +9,7 @@ import (
 
 	"yonderllm/internal/provider"
 	"yonderllm/internal/session"
+	"yonderllm/internal/terminaltext"
 )
 
 // newRunCmd builds the headless command.
@@ -151,7 +152,7 @@ func newWireUsage(u *provider.Usage) *wireUsage {
 // self-describing for a consumer that only reads stdout while the exit code
 // still tells a shell that something went wrong.
 func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, prompt string) error {
-	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc := json.NewEncoder(terminaltext.Raw(cmd.OutOrStdout()))
 
 	var outputErr error
 	emit := func(ev wireEvent) {

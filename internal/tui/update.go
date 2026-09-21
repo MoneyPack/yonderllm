@@ -67,6 +67,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// cannot answer it by accident, and so that the answer is always one
 	// keystroke rather than a keystroke aimed at a hidden input.
 	if m.asking {
+		if allowsApproval(msg) && (!m.ready || m.height < headerHeight+footerHeight+inputHeight+minViewport || m.width < 20) {
+			return m, nil
+		}
 		return m, answerApproval(m.question, allowsApproval(msg))
 	}
 
@@ -129,6 +132,12 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 	// rather than queued: the user keeps their text and can resend it.
 	if m.busy {
 		m.append(block{kind: blockNotice, text: "still answering — press ctrl+c to stop"})
+		return m, nil
+	}
+	// Cancellation releases the keyboard before the worker has necessarily
+	// released Session. Preserve input until all its reads/writes have ended.
+	if m.stopping() {
+		m.append(block{kind: blockNotice, text: "still stopping — send again once the exchange has stopped"})
 		return m, nil
 	}
 

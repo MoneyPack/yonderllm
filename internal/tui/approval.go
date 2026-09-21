@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"yonderllm/internal/perm"
+	"yonderllm/internal/terminaltext"
 	"yonderllm/internal/tools"
 )
 
@@ -150,7 +151,7 @@ func waitForApproval(a *Approvals) tea.Cmd {
 // by its answer in the place the question was asked.
 func approvalView(req approvalRequest, outcome string) string {
 	var b strings.Builder
-	b.WriteString(req.target)
+	b.WriteString(terminaltext.Line(req.target))
 
 	if detail := strings.TrimRight(req.detail, "\n"); detail != "" {
 		b.WriteString("\n")
