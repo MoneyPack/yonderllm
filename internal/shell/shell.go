@@ -404,7 +404,10 @@ func findExecutes(args []string) bool {
 // rm.cmd is still rm to whoever wrote it, so every launchable extension is
 // removed and not only .exe.
 func verb(arg string) string {
-	name := strings.ToLower(filepath.Base(filepath.ToSlash(strings.TrimSpace(arg))))
+	// Models may spell a Windows path even when this binary runs on Unix.
+	// filepath.ToSlash is a no-op for '\' on non-Windows hosts, so the
+	// separator is normalized by hand before Base extracts the name.
+	name := strings.ToLower(filepath.Base(strings.ReplaceAll(strings.TrimSpace(arg), `\`, "/")))
 	for _, ext := range []string{".exe", ".cmd", ".bat", ".ps1", ".com"} {
 		if strings.HasSuffix(name, ext) {
 			return strings.TrimSuffix(name, ext)
