@@ -16,9 +16,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yonderllm/internal/perm"
-	"yonderllm/internal/terminaltext"
-	"yonderllm/internal/tools"
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/terminaltext"
+	"github.com/MoneyPack/yonderllm/internal/tools"
 )
 
 // maxApprovalLines caps how much of a request's detail reaches the prompt. The
@@ -175,6 +175,11 @@ const (
 	// rather than as a screen full of questions still waiting.
 	approvalAllowed = "allowed"
 	approvalDenied  = "denied"
+	// approvalEnded is the outcome when the exchange finished before the
+	// question was answered. It is still a denial — the tool took the end
+	// of its context as a no — but one nobody chose, and the transcript
+	// should not read as though they did.
+	approvalEnded = "denied (exchange ended)"
 )
 
 // approvalOutcome names a decision.

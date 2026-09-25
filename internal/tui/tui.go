@@ -15,9 +15,10 @@ import (
 	"io"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
-	"yonderllm/internal/perm"
-	"yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/session"
 )
 
 // Options configures an interactive session.
@@ -57,7 +58,15 @@ func Run(opts Options) error {
 		teaOpts = append(teaOpts, tea.WithOutput(opts.Out))
 	}
 
-	if _, err := tea.NewProgram(newModelWithSessions(opts.Session, opts.Mode, opts.Approvals, opts.Sessions), teaOpts...).Run(); err != nil {
+	m := newModelWithSessions(opts.Session, opts.Mode, opts.Approvals, opts.Sessions)
+	if opts.Out != nil {
+		// Styles are judged against the writer the program draws to, so
+		// that NO_COLOR, TERM and terminal detection describe the
+		// output rather than a standard output it may not be using.
+		m.styles = stylesFor(lipgloss.NewRenderer(opts.Out))
+	}
+
+	if _, err := tea.NewProgram(m, teaOpts...).Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
 	}
 	return nil

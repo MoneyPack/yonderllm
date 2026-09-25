@@ -1,9 +1,9 @@
 package tui
 
 import (
+	"github.com/MoneyPack/yonderllm/internal/session"
 	"strings"
 	"testing"
-	"yonderllm/internal/session"
 )
 
 func TestActivityTracksToolsAndDiscardsStaleTicks(t *testing.T) {

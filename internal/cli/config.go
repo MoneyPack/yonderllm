@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"yonderllm/internal/config"
+	"github.com/MoneyPack/yonderllm/internal/config"
 )
 
 // newConfigCmd builds the `config` command group: inspect where settings come
@@ -211,6 +211,7 @@ func writeConfigJSON(w io.Writer, cfg config.Config, override string) error {
 			Ready:             cfg.Credentialed(name),
 			OmitStreamOptions: pc.OmitStreamOptions,
 			HeaderEnv:         pc.HeaderEnv,
+			ContextWindow:     pc.ContextWindow,
 		})
 	}
 
@@ -268,6 +269,9 @@ type wireConfigProvider struct {
 	BaseURL           string            `json:"base_url,omitempty"`
 	APIKeyEnv         string            `json:"api_key_env,omitempty"`
 	Ready             bool              `json:"ready"`
+	// ContextWindow is omitted when unset so that existing consumers see
+	// no new key until a user opts into the setting.
+	ContextWindow int `json:"context_window,omitempty"`
 }
 
 // configSource resolves the path to report and labels where it came from, so
@@ -330,9 +334,12 @@ func envLabel(name string) string {
 	return name
 }
 
-// starterConfig is the commented file written by `config init`. It is a
-// literal rather than a marshalled Config because the point of the file is the
-// comments: a TOML encoder would emit the values and drop every explanation.
+// starterConfig is the commented file written by `config init`. The prose is
+// a literal rather than a marshalled Config because the point of the file is
+// the comments: a TOML encoder would emit the values and drop every
+// explanation. The provider tables, which carry no prose, are generated from
+// [config.Defaults] so that the file `init` writes can never name a different
+// model or URL from the one Load would have used without it.
 func starterConfig() string {
 	return fmt.Sprintf(`# yonderllm configuration
 #
@@ -347,7 +354,7 @@ func starterConfig() string {
 provider = %q
 
 # Tried in order when the active provider reports a quota or auth failure.
-fallbacks = ["gemini", "openrouter"]
+fallbacks = %s
 
 # Permission mode at startup: "chat" (no filesystem or shell), "code"
 # (read and search, patches need approval), or "agent" (read, search,
@@ -368,34 +375,45 @@ request_timeout_seconds = 0
 # Default for run; --json=false overrides it. ask always prints text.
 output_format = "text"
 
-[providers.groq]
-base_url    = "https://api.groq.com/openai/v1"
-api_key_env = "GROQ_API_KEY"
-model       = "llama-3.3-70b-versatile"
-
-[providers.gemini]
-base_url    = "https://generativelanguage.googleapis.com/v1beta/openai"
-api_key_env = "GEMINI_API_KEY"
-model       = "gemini-2.0-flash"
-
-[providers.openrouter]
-base_url    = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_API_KEY"
-model       = "meta-llama/llama-3.3-70b-instruct:free"
-
-[providers.surplus]
-base_url    = "https://api.surplusintelligence.ai/v1"
-api_key_env = "SURPLUS_API_KEY"
-model       = "gpt-5.6-sol"
-
+# Each provider may also set context_window (tokens) so that long
+# conversations are trimmed to the model's real limit instead of a
+# conservative default.
+%s
 # A local or self-hosted OpenAI-compatible server needs no key:
 # [providers.local]
 # base_url = "http://localhost:8080/v1"
 # model    = "whatever-it-serves"
 `,
 		config.DefaultProvider,
+		tomlStringList(config.Defaults().Fallbacks),
 		config.DefaultMode,
 		config.DefaultMaxTokens,
 		config.DefaultDailyCap,
+		starterProviderTables(config.Defaults()),
 	)
+}
+
+// starterProviderTables renders one [providers.NAME] table per built-in
+// provider, in the order the providers subcommand lists them, so the file
+// reads the way a failing request walks the chain.
+func starterProviderTables(cfg config.Config) string {
+	var b strings.Builder
+	for _, name := range sortedProviderNames(cfg) {
+		pc := cfg.Providers[name]
+		fmt.Fprintf(&b, "\n[providers.%s]\n", name)
+		fmt.Fprintf(&b, "base_url    = %q\n", pc.BaseURL)
+		fmt.Fprintf(&b, "api_key_env = %q\n", pc.APIKeyEnv)
+		fmt.Fprintf(&b, "model       = %q\n", pc.Model)
+	}
+	return b.String()
+}
+
+// tomlStringList renders a TOML array of strings. Go's %q quoting is a valid
+// TOML basic string for the provider names this is used on.
+func tomlStringList(items []string) string {
+	quoted := make([]string, 0, len(items))
+	for _, item := range items {
+		quoted = append(quoted, fmt.Sprintf("%q", item))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }

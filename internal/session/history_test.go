@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 func TestEstimateTokens(t *testing.T) {
@@ -189,99 +189,6 @@ func TestHistoryPromptOnEmptyHistory(t *testing.T) {
 	var h History
 	if got := h.Prompt(10); len(got) != 0 {
 		t.Errorf("Prompt on empty history = %v, want no messages", contents(got))
-	}
-}
-
-func TestRedactable(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-		// leak is the substring that must not survive. Empty means the case
-		// carries no credential and is here to prove nothing was removed.
-		leak string
-	}{
-		{name: "no credential", in: "just a prompt", want: "just a prompt"},
-		{
-			name: "token mid-string",
-			in:   "curl -H 'Bearer sk-secret' url",
-			want: "curl -H 'Bearer [redacted]' url",
-			leak: "sk-secret",
-		},
-		{
-			name: "token at end",
-			in:   "use Bearer sk-secret",
-			want: "use Bearer [redacted]",
-			leak: "sk-secret",
-		},
-		{
-			name: "token before newline",
-			in:   "Bearer sk-secret\nnext line",
-			want: "Bearer [redacted]\nnext line",
-			leak: "sk-secret",
-		},
-		{name: "bare marker", in: "Bearer ", want: "Bearer [redacted]"},
-		{
-			name: "vendor key alone",
-			in:   "sk-0123456789abcdef",
-			want: "[redacted]",
-			leak: "sk-0123456789abcdef",
-		},
-		{
-			name: "vendor key in a sentence",
-			in:   "is gsk_0123456789abcdef still valid?",
-			want: "is [redacted] still valid?",
-			leak: "gsk_0123456789abcdef",
-		},
-		{
-			name: "env assignment",
-			in:   "GROQ_API_KEY=gsk_0123456789abcdef",
-			want: "GROQ_API_KEY=[redacted]",
-			leak: "gsk_0123456789abcdef",
-		},
-		{
-			name: "quoted env assignment",
-			in:   `GEMINI_API_KEY="averysecretvalue"`,
-			want: `GEMINI_API_KEY="[redacted]"`,
-			leak: "averysecretvalue",
-		},
-		{
-			name: "layout is preserved byte for byte",
-			in:   "# .env\n\n\tOPENROUTER_API_KEY=or-0123456789abcdef\n",
-			want: "# .env\n\n\tOPENROUTER_API_KEY=[redacted]\n",
-			leak: "or-0123456789abcdef",
-		},
-		// The rules below must not fire: guessing wrong here corrupts the
-		// question the user is asking.
-		{name: "short mention of a prefix", in: "sk-1 is too short", want: "sk-1 is too short"},
-		{name: "unrelated assignment", in: "PATH=/usr/local/bin", want: "PATH=/usr/local/bin"},
-		{
-			name: "commit hash",
-			in:   "revert 9f4a1c2d3e5b6a7f8c9d0e1f2a3b4c5d6e7f8a9b",
-			want: "revert 9f4a1c2d3e5b6a7f8c9d0e1f2a3b4c5d6e7f8a9b",
-		},
-		{
-			name: "uuid",
-			in:   "row 123e4567-e89b-12d3-a456-426614174000 is missing",
-			want: "row 123e4567-e89b-12d3-a456-426614174000 is missing",
-		},
-		{
-			name: "long identifier",
-			in:   "rename configurationManagerFactoryProvider",
-			want: "rename configurationManagerFactoryProvider",
-		},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := redactable(c.in)
-			if got != c.want {
-				t.Errorf("redactable(%q) = %q, want %q", c.in, got, c.want)
-			}
-			if c.leak != "" && strings.Contains(got, c.leak) {
-				t.Errorf("redactable(%q) leaked the credential: %q", c.in, got)
-			}
-		})
 	}
 }
 

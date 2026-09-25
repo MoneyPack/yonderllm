@@ -139,12 +139,12 @@ func readPromptWithContext(in io.Reader, args []string, appendStdin bool) (strin
 	if err != nil {
 		return "", err
 	}
-	context, err := readPrompt(in, nil)
+	piped, err := readPrompt(in, nil)
 	if err != nil {
 		return "", err
 	}
-	if len(prompt)+len(context)+2 > maxPromptBytes {
+	if len(prompt)+len(piped)+2 > maxPromptBytes {
 		return "", errPromptTooLarge
 	}
-	return prompt + "\n\n" + context, nil
+	return prompt + "\n\n" + piped, nil
 }

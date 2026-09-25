@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"iter"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 type fixture struct{ id string }

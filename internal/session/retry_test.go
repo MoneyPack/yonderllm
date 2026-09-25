@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 func TestRetryDoesNotDuplicatePromptOrRunTools(t *testing.T) {
@@ -56,7 +56,8 @@ func TestRetryHonorsCapAndAutosaveFailureIsNotRetryable(t *testing.T) {
 	cfg := testConfig("groq")
 	cfg.DailyCap = 1
 	s := New(cfg, resolverFor(p))
-	collect(s.Ask(context.Background(), "question"))
+	// The first ask is expected to fail; only the retry's outcome matters.
+	_, _, _, _ = collect(s.Ask(context.Background(), "question"))
 	_, _, _, err := collect(s.Retry(context.Background()))
 	var capErr *CapError
 	if !errors.As(err, &capErr) || p.calls != 1 {
@@ -129,7 +130,9 @@ func TestRetryRefusesFreshClearedAndIncompleteHistory(t *testing.T) {
 	if err := s.CanRetry(); err == nil {
 		t.Fatal("fresh session retryable")
 	}
-	collect(s.Ask(context.Background(), "hello"))
+	// The provider is offline, so this ask fails; the point is the history
+	// it leaves behind.
+	_, _, _, _ = collect(s.Ask(context.Background(), "hello"))
 	s.history.AppendToolCalls("", []provider.ToolCall{{ID: "unfinished", Name: "write"}})
 	if err := s.CanRetry(); err == nil {
 		t.Fatal("incomplete tool exchange retryable")

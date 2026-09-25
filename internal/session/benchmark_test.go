@@ -1,9 +1,9 @@
 package session
 
 import (
+	"github.com/MoneyPack/yonderllm/internal/provider"
 	"strings"
 	"testing"
-	"yonderllm/internal/provider"
 )
 
 func BenchmarkHistoryMessages(b *testing.B) {

@@ -11,9 +11,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yonderllm/internal/perm"
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
 )
 
 // A closed approval channel means there is no interface left to ask. The

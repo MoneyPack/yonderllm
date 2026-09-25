@@ -13,6 +13,32 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MoneyPack/yonderllm/internal/redact"
+)
+
+// Byte limits on what is read back from a provider. Every response crosses an
+// untrusted boundary, and a broken or hostile server should not be able to
+// make the client buffer without bound.
+const (
+	// maxStreamBytes caps one streamed completion. It is generous enough
+	// for a long answer with usage frames and comfortably below anything
+	// a free-tier output limit could produce.
+	maxStreamBytes = 16 << 20
+	// maxModelListBytes caps a GET /models body. Catalogues are a few
+	// hundred KiB at most; the limit matches the stream so that neither
+	// path is the easier one to abuse.
+	maxModelListBytes = 16 << 20
+	// maxSSELineBytes is the longest single SSE line the scanner accepts.
+	// A frame can carry a large delta, and the scanner's default 64 KiB
+	// is not enough to rely on.
+	maxSSELineBytes = 1 << 20
+	// sseScanBuffer is the scanner's initial buffer; it grows on demand up
+	// to maxSSELineBytes.
+	sseScanBuffer = 64 << 10
+	// maxErrorBodyBytes caps the body read from a non-200 response. An
+	// error envelope is small, and only its message is used.
+	maxErrorBodyBytes = 8 << 10
 )
 
 // ChatCompat adapts any backend that speaks the [OI]-style chat-completions
@@ -250,12 +276,8 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		}
 		for _, t := range req.Tools {
 			body.Tools = append(body.Tools, wireTool{
-				Type: "function",
-				Function: wireFunction{
-					Name:        t.Name,
-					Description: t.Description,
-					Parameters:  t.Parameters,
-				},
+				Type:     "function",
+				Function: wireFunction(t),
 			})
 		}
 		for _, m := range req.Messages {
@@ -305,9 +327,7 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 		}
 
 		scanner := bufio.NewScanner(resp.Body)
-		// A single SSE frame can carry a large delta; the default 64 KiB
-		// limit is not generous enough to rely on.
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		scanner.Buffer(make([]byte, 0, sseScanBuffer), maxSSELineBytes)
 
 		calls := newToolCallBuffer()
 		streamBytes := 0
@@ -327,8 +347,8 @@ func (p *ChatCompat) Stream(ctx context.Context, req Request) iter.Seq2[Chunk, e
 
 		for scanner.Scan() {
 			streamBytes += len(scanner.Bytes()) + 1
-			if streamBytes > 16*1024*1024 {
-				yield(Chunk{}, fmt.Errorf("%s: response stream exceeds the 16 MiB limit", p.name))
+			if streamBytes > maxStreamBytes {
+				yield(Chunk{}, fmt.Errorf("%s: response stream exceeds the %d MiB limit", p.name, maxStreamBytes>>20))
 				return
 			}
 			line := strings.TrimSpace(scanner.Text())
@@ -491,8 +511,6 @@ func (p *ChatCompat) Models(ctx context.Context) ([]Model, error) {
 		return nil, p.statusError(resp)
 	}
 
-	// Catalogue responses cross the same untrusted boundary as streams.
-	const maxModelListBytes = 16 << 20
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxModelListBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("%s: reading model list: %w", p.name, err)
@@ -540,9 +558,7 @@ func (p *ChatCompat) setHeaders(req *http.Request) {
 // reporting. The provider's message is redacted before it is surfaced, because
 // several providers echo the offending key back on a 401.
 func (p *ChatCompat) statusError(resp *http.Response) error {
-	// Cap the read: an error body should be small, and a broken or hostile
-	// server should not be able to make us buffer without bound.
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 
 	var envelope struct {
 		Error struct {
@@ -578,17 +594,21 @@ func (p *ChatCompat) statusError(resp *http.Response) error {
 	return fmt.Errorf("%s: %s (HTTP %d)", p.name, message, resp.StatusCode)
 }
 
+// redactMessage scrubs provider text before it reaches a log or a screen. The
+// adapter knows its own credentials exactly, so those are removed verbatim
+// first; the shape-based rule then catches anything the server echoed that
+// the adapter never sent, such as a key from another account.
 func (p *ChatCompat) redactMessage(message string) string {
 	message = strings.TrimSpace(message)
 	if p.apiKey != "" {
-		message = strings.ReplaceAll(message, p.apiKey, "[redacted]")
+		message = strings.ReplaceAll(message, p.apiKey, redact.Placeholder)
 	}
 	for _, value := range p.extraHeaders {
 		if value != "" {
-			message = strings.ReplaceAll(message, value, "[redacted]")
+			message = strings.ReplaceAll(message, value, redact.Placeholder)
 		}
 	}
-	return redactKeyish(message)
+	return redact.Message(message)
 }
 
 // retryAfter reads the standard hint, accepting both the seconds and the HTTP
@@ -607,54 +627,4 @@ func retryAfter(resp *http.Response) time.Duration {
 		}
 	}
 	return 0
-}
-
-// redactKeyish removes anything shaped like a credential from provider text.
-func redactKeyish(s string) string {
-	fields := strings.Fields(s)
-	for i, f := range fields {
-		trimmed := strings.Trim(f, `"'.,:;()[]`)
-		if trimmed != "" && looksLikeKey(trimmed) {
-			fields[i] = strings.ReplaceAll(f, trimmed, "[redacted]")
-			continue
-		}
-		for _, prefix := range []string{"sk-", "sk_", "gsk_", "AIza", "or-"} {
-			if at := strings.Index(f, prefix); at >= 0 {
-				end := at
-				for end < len(f) && isKeyChar(f[end]) {
-					end++
-				}
-				if end-at >= 16 {
-					fields[i] = f[:at] + "[redacted]" + f[end:]
-					break
-				}
-			}
-		}
-	}
-	return strings.Join(fields, " ")
-}
-
-func isKeyChar(b byte) bool {
-	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '-' || b == '_'
-}
-
-// looksLikeKey reports whether a token resembles an API key: anything carrying
-// a known vendor prefix, or a long opaque run of key characters.
-func looksLikeKey(s string) bool {
-	for _, prefix := range []string{"sk-", "sk_", "gsk_", "AIza", "or-"} {
-		if strings.HasPrefix(s, prefix) {
-			return true
-		}
-	}
-	if len(s) < 24 {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-		default:
-			return false
-		}
-	}
-	return true
 }

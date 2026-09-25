@@ -134,7 +134,7 @@ fallbacks = ["gemini", "groq"]
 	if openrouter < 0 || gemini < 0 || groq < 0 {
 		t.Fatalf("not every provider was listed\n--- stdout ---\n%s", r.stdout)
 	}
-	if !(openrouter < gemini && gemini < groq) {
+	if openrouter >= gemini || gemini >= groq {
 		t.Errorf("rows are not in chain order (openrouter, gemini, groq)\n--- stdout ---\n%s", r.stdout)
 	}
 }

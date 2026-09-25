@@ -34,7 +34,9 @@ func TestProviderDoesNotFollowRedirectWithCredentials(t *testing.T) {
 	requests := 0
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++; w.WriteHeader(401) }))
 	defer target.Close()
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, 307) }))
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
 	defer origin.Close()
 	p := NewChatCompat("stub", origin.URL, "secret")
 	_, _, err := collect(p.Stream(context.Background(), Request{Model: "tiny"}))

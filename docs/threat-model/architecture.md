@@ -1,7 +1,9 @@
 # yonderllm architecture knowledge base
 
-Source baseline: `c32c1c2` plus the uncommitted safety/TUI/evaluation changes in
-this workspace. This is an unpinned working-tree review, not a release audit.
+Source baseline: `ce03af3` (the `v0.2.0-rc.2` tree) plus the uncommitted
+approval, environment-scrubbing and TUI changes in this workspace, as listed in
+the [threat model](../THREAT_MODEL.md). This is a working-tree review, not a
+release audit.
 
 ## Operated system
 
@@ -19,7 +21,8 @@ chat streaming and model enumeration are outbound HTTP operations.
 rounds, and usage. Tools are selected by `internal/perm` and constructed by
 `internal/tools`; approvals occur there before workspace writes or process
 execution. Workspace file access uses `os.Root`. Approved programs execute with
-the user's OS permissions, inherited environment, and network access.
+the user's OS permissions and network access, and an environment from which the
+configured credential variables have been removed.
 
 Stream events reach the TUI through a worker goroutine/channel. Cancellation
 signals that worker; a completion channel now prevents new input from accessing
@@ -42,8 +45,10 @@ provider, with in-memory tools and no fallback/retries/session persistence.
 - `internal/provider/chatcompat.go`: redirect refusal, SSE and catalogue limits.
 - `internal/session/session.go`: history, retries, fallback, tool rounds.
 - `internal/tools/tools.go`, `internal/perm/perm.go`: capability and approval policy.
-- `internal/workspace/workspace.go`: rooted file access and bounded result policy.
-- `internal/shell/shell.go`: argv execution, inherited environment, output cap.
+- `internal/workspace/workspace.go`, `guard.go`: rooted file access, bounded
+  results, credential-file and hook-file name classification.
+- `internal/shell/shell.go`: argv execution, destructive/interpreter tables,
+  credential scrubbing of the child environment, output cap.
 - `internal/session/sessions.go`, `usagestore.go`: local persistence.
 - `internal/tui/stream.go`, `update.go`: event delivery and stop lifecycle.
 

@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"yonderllm/internal/terminaltext"
+	"github.com/MoneyPack/yonderllm/internal/terminaltext"
 )
 
 // brandName is the name shown in the header chip. It is the one word on screen
@@ -38,19 +38,12 @@ func (m model) View() string {
 			"mode " + m.mode.String() + "\nEnlarge terminal\n" + m.footer())
 	}
 
-	transcript := m.view.View()
-	if len(m.blocks) == 1 && m.blocks[0].tag == "welcome" && !m.busy && !m.asking {
-		// Use a copy so the welcome layout never changes transcript scroll state.
-		view := m.view
-		view.SetContent(m.welcome())
-		view.GotoTop()
-		transcript = view.View()
-	}
-
+	// The welcome, when it is showing, was put into the viewport by draw
+	// along with everything else; View only reads what is there.
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		m.header(),
-		transcript,
+		m.view.View(),
 		m.input.View(),
 		m.footer(),
 	)
@@ -147,7 +140,12 @@ func (m model) footer() string {
 		frame := frames[m.spinner%len(frames)]
 		const stop = " ctrl+c stop"
 		hint = truncate(fmt.Sprintf("%s %s…", frame, activity), m.width-len(stop)) + stop
-	case m.stopping():
+	case m.command != "":
+		// The prompt still takes typing while a command works, but
+		// Enter is held until the result is in, and the footer is where
+		// that is explained before the held Enter can surprise anyone.
+		hint = "running " + m.command + "… · enter waits · ctrl+c quit"
+	case m.unwinding:
 		hint = "stopping… input preserved · ctrl+c quit"
 	default:
 		hint = "enter send · ctrl+j newline · pgup/pgdn scroll · /help commands · ctrl+c quit"

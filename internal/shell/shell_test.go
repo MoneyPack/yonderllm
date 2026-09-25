@@ -3,11 +3,13 @@ package shell
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/perm"
 )
 
 // sep is the separator this platform puts in a path, so that a test can state
@@ -243,6 +245,234 @@ func TestDestructive(t *testing.T) {
 		if got := Destructive(test.args); got != test.want {
 			t.Errorf("Destructive(%q) = %v, want %v", test.args, got, test.want)
 		}
+	}
+}
+
+// Every entry here once ran unprompted under --yes, because the table judged
+// argv and the dangerous part was inside a string, behind an interpreter, or
+// spelled with a Windows extension. Each is a bypass the audit named, kept as
+// a regression so that a future trim of the tables cannot quietly reopen one.
+func TestDestructiveCatchesInterpretersAndLaunchers(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"sh -c", []string{"sh", "-c", "rm -rf ."}},
+		{"bash script", []string{"bash", "x.sh"}},
+		{"zsh", []string{"zsh", "-c", "true"}},
+		{"dash", []string{"dash", "x.sh"}},
+		{"fish", []string{"fish", "-c", "true"}},
+		{"cmd /c", []string{"cmd", "/c", "del /q *"}},
+		{"cmd.exe", []string{"cmd.exe", "/c", "dir"}},
+		{"command.com", []string{"command.com", "/c", "dir"}},
+		{"powershell -Command", []string{"powershell", "-Command", "Remove-Item -Recurse ."}},
+		{"pwsh -File", []string{"pwsh", "-File", "x.ps1"}},
+		{"python -c", []string{"python", "-c", "import shutil"}},
+		{"python3", []string{"python3", "x.py"}},
+		{"python3.12", []string{"python3.12", "--version"}},
+		{"python.exe", []string{"python.exe", "x.py"}},
+		{"node -e", []string{"node", "-e", "require('fs').rmSync('.')"}},
+		{"node.cmd", []string{"node.cmd", "x.js"}},
+		{"deno", []string{"deno", "run", "x.ts"}},
+		{"bun", []string{"bun", "x.ts"}},
+		{"perl -e", []string{"perl", "-e", "unlink"}},
+		{"perl5.36", []string{"perl5.36", "x.pl"}},
+		{"ruby -e", []string{"ruby", "-e", "puts 1"}},
+		{"php -r", []string{"php", "-r", "unlink('x');"}},
+		{"lua5.4", []string{"lua5.4", "x.lua"}},
+		{"awk system", []string{"awk", "BEGIN{system(\"rm x\")}"}},
+		{"xargs rm", []string{"xargs", "rm"}},
+		{"find -exec", []string{"find", ".", "-exec", "rm", "{}", ";"}},
+		{"find -execdir", []string{"find", ".", "-execdir", "rm", "{}", ";"}},
+		{"find -ok", []string{"find", ".", "-ok", "rm", "{}", ";"}},
+		{"find -delete", []string{"find", ".", "-name", "*.o", "-delete"}},
+		{"env cmd", []string{"env", "FOO=1", "rm", "x"}},
+		{"env alone", []string{"env"}},
+		{"nohup", []string{"nohup", "rm", "x"}},
+		{"sudo", []string{"sudo", "ls"}},
+		{"doas", []string{"doas", "ls"}},
+		{"timeout", []string{"timeout", "5", "rm", "x"}},
+		{"npx", []string{"npx", "some-package"}},
+		{"npm exec", []string{"npm", "exec", "some-package"}},
+		{"pnpm dlx", []string{"pnpm", "dlx", "some-package"}},
+		{"wscript", []string{"wscript", "x.vbs"}},
+		{"mshta", []string{"mshta", "x.hta"}},
+		{"git -c", []string{"git", "-c", "core.hooksPath=/tmp/h", "status"}},
+		{"git --config-env", []string{"git", "--config-env=core.sshCommand=X", "status"}},
+		{"git branch -D", []string{"git", "branch", "-D", "main"}},
+		{"git branch -d", []string{"git", "branch", "-d", "topic"}},
+		{"git branch --delete", []string{"git", "branch", "--delete", "topic"}},
+		{"git -C dir branch -D", []string{"git", "-C", "sub", "branch", "-D", "main"}},
+		{"git stash drop", []string{"git", "stash", "drop"}},
+		{"git stash clear", []string{"git", "stash", "clear"}},
+		{"git checkout -- .", []string{"git", "checkout", "--", "."}},
+		{"git checkout .", []string{"git", "checkout", "."}},
+		{"git restore", []string{"git", "restore", "x.go"}},
+		{"git switch --discard-changes", []string{"git", "switch", "--discard-changes", "main"}},
+		{"git config", []string{"git", "config", "core.hooksPath", "h"}},
+		{"git rm", []string{"git", "rm", "x.go"}},
+		{"git reflog", []string{"git", "reflog", "expire", "--all"}},
+		{"git tag -d", []string{"git", "tag", "-d", "v1"}},
+		{"make clean", []string{"make", "clean"}},
+		{"make distclean", []string{"make", "distclean"}},
+		{"make install", []string{"make", "install"}},
+		{"cargo clean", []string{"cargo", "clean"}},
+		{"rm.cmd", []string{"rm.cmd", "x"}},
+		{"rm.bat", []string{"rm.bat", "x"}},
+		{"rm.ps1", []string{"rm.ps1", "x"}},
+		{"del.com", []string{"del.com", "x"}},
+		{"RM.CMD", []string{"RM.CMD", "x"}},
+		{"scripts/sh", []string{"scripts/sh", "-c", "true"}},
+		{"reg delete", []string{"reg", "delete", `HKCU\Software\X`}},
+		{"schtasks /create", []string{"schtasks", "/create", "/tn", "x"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !Destructive(test.args) {
+				t.Errorf("Destructive(%q) = false, want true: this ran unprompted under --yes", test.args)
+			}
+		})
+	}
+}
+
+// The tables err towards yes, but not so far that ordinary work costs a
+// question every time. These are the commands a model runs all day in agent
+// mode and none of them changes anything it was not asked to.
+func TestDestructiveLetsOrdinaryWorkThrough(t *testing.T) {
+	tests := [][]string{
+		{"go", "build", "./..."},
+		{"go", "test", "./internal/shell"},
+		{"go", "vet", "./..."},
+		{"go", "run", "."},
+		{"git", "status"},
+		{"git", "add", "."},
+		{"git", "log", "--", "x.go"},
+		{"git", "diff", "--", "x.go"},
+		{"git", "branch"},
+		{"git", "branch", "-a"},
+		{"git", "stash", "list"},
+		{"git", "checkout", "main"},
+		{"git", "switch", "main"},
+		{"git", "tag"},
+		{"git", "-C", "sub", "status"},
+		{"make"},
+		{"make", "test"},
+		{"cargo", "build"},
+		{"npm", "test"},
+		{"ls", "-la"},
+		{"cat", "x.go"},
+		{"7z", "l", "x.7z"},
+		{"bzip2", "-k", "x"},
+		{"python-config", "--libs"},
+		{"gofmt", "-l", "."},
+	}
+	for _, args := range tests {
+		if Destructive(args) {
+			t.Errorf("Destructive(%q) = true, want false: ordinary work should not cost a question", args)
+		}
+	}
+}
+
+// verb is where a Windows spelling is reduced to the name a table holds. An
+// extension the operating system would launch without being told is dropped,
+// and nothing else is, so that a filename with a dot in it survives.
+func TestVerbStripsLaunchableExtensions(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"rm", "rm"},
+		{"rm.exe", "rm"},
+		{"rm.cmd", "rm"},
+		{"rm.bat", "rm"},
+		{"rm.ps1", "rm"},
+		{"command.com", "command"},
+		{"RM.EXE", "rm"},
+		{`C:\tools\rm.cmd`, "rm"},
+		{"./scripts/rm.bat", "rm"},
+		{"python3.12", "python3.12"},
+		{"tool.tar.gz", "tool.tar.gz"},
+		{"  rm.exe  ", "rm"},
+	}
+	for _, test := range tests {
+		if got := verb(test.in); got != test.want {
+			t.Errorf("verb(%q) = %q, want %q", test.in, got, test.want)
+		}
+	}
+}
+
+// scrub is the whole of what keeps a configured key out of a child, so the
+// rules are checked directly: configured and well-known names go, case does
+// not save a name, and everything else is left exactly as it was.
+func TestScrubDropsOnlyTheNamedVariables(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin",
+		"GROQ_API_KEY=well-known",
+		"Groq_Api_Key=well-known-in-another-case",
+		"MY_PROVIDER_KEY=configured",
+		"my_provider_key=configured-lowercase",
+		"X_PROJECT_HEADER=configured-header",
+		"HOME=/home/me",
+		"=C:=C:\\odd-windows-entry",
+		"NOEQUALS",
+	}
+	got := scrub(environ, []string{"MY_PROVIDER_KEY", " x_project_header ", ""})
+
+	want := []string{"PATH=/usr/bin", "HOME=/home/me", "=C:=C:\\odd-windows-entry", "NOEQUALS"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("scrub() = %q, want %q", got, want)
+	}
+}
+
+// TestEnvChild is the program run by TestRunHidesSecretsFromTheChild: when it
+// finds itself started as a child it prints what it can see of the variables
+// under test and exits, and otherwise does nothing. The test binary stands in
+// for `env` so the test does not depend on a program the host may not have.
+func TestEnvChild(t *testing.T) {
+	if os.Getenv("YONDER_SHELL_CHILD") != "env" {
+		return
+	}
+	for _, name := range []string{"YONDER_TEST_PLAIN", "YONDER_TEST_CONFIGURED_KEY", "GROQ_API_KEY"} {
+		if value, ok := os.LookupEnv(name); ok {
+			fmt.Printf("%s=%s\n", name, value)
+		}
+	}
+	os.Exit(0)
+}
+
+// A child inherits the environment it needs to build things and not the key
+// this program talks to its provider with. The configured name is passed in a
+// different case from the one it was set in, because Windows would resolve it
+// either way and the filter has to agree with the operating system about that.
+func TestRunHidesSecretsFromTheChild(t *testing.T) {
+	t.Setenv("YONDER_SHELL_CHILD", "env")
+	t.Setenv("YONDER_TEST_PLAIN", "plain")
+	t.Setenv("YONDER_TEST_CONFIGURED_KEY", "secret-configured")
+	t.Setenv("GROQ_API_KEY", "secret-well-known")
+
+	r := Open(filepath.Dir(os.Args[0]), perm.New(perm.Agent), "yonder_test_configured_key")
+	result, err := r.Run(context.Background(), []string{"./" + filepath.Base(os.Args[0]), "-test.run=^TestEnvChild$"})
+	if err != nil {
+		t.Fatalf("running the child: %v", err)
+	}
+	if !strings.Contains(result.Output, "YONDER_TEST_PLAIN=plain") {
+		t.Errorf("child output %q lacks the ordinary variable; the filter took too much", result.Output)
+	}
+	if strings.Contains(result.Output, "secret-") {
+		t.Errorf("child output %q carries a secret; the filter took too little", result.Output)
+	}
+}
+
+// A runner given nothing to hide still hides the well-known names, so a
+// caller that has not been taught the parameter is not worse off than before.
+func TestRunHidesWellKnownSecretsWithoutBeingAsked(t *testing.T) {
+	t.Setenv("YONDER_SHELL_CHILD", "env")
+	t.Setenv("GROQ_API_KEY", "secret-well-known")
+
+	r := Open(filepath.Dir(os.Args[0]), perm.New(perm.Agent))
+	result, err := r.Run(context.Background(), []string{"./" + filepath.Base(os.Args[0]), "-test.run=^TestEnvChild$"})
+	if err != nil {
+		t.Fatalf("running the child: %v", err)
+	}
+	if strings.Contains(result.Output, "GROQ_API_KEY") {
+		t.Errorf("child output %q carries a well-known key", result.Output)
 	}
 }
 

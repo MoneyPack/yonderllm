@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 // fakeClock is a hand-advanced clock, so that midnight rollover can be tested
@@ -121,7 +121,9 @@ func TestUsageReleaseRefundsAndFloorsAtZero(t *testing.T) {
 	if err := u.Reserve(); err != nil {
 		t.Fatalf("first reservation rejected: %v", err)
 	}
-	u.Release()
+	if err := u.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
 	if got := u.Requests(); got != 0 {
 		t.Fatalf("Requests() = %d after release, want 0", got)
 	}
@@ -133,9 +135,11 @@ func TestUsageReleaseRefundsAndFloorsAtZero(t *testing.T) {
 
 	// Releasing more than was reserved must not push the count negative,
 	// which would silently hand out free requests.
-	u.Release()
-	u.Release()
-	u.Release()
+	for range 3 {
+		if err := u.Release(); err != nil {
+			t.Fatalf("over-release reported an error: %v", err)
+		}
+	}
 	if got := u.Requests(); got != 0 {
 		t.Errorf("Requests() = %d after over-releasing, want 0", got)
 	}

@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"iter"
-	"slices"
 	"sort"
-	"time"
 
-	"yonderllm/internal/config"
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/redact"
 )
 
 // defaultContextWindow is assumed when a provider does not report one. It is
@@ -78,6 +75,11 @@ type Event struct {
 	Notice string
 	// Provider is the adapter that produced this event.
 	Provider string
+	// Model is the model id Provider was asked for. It travels on the event
+	// rather than being read off the session by the consumer because after
+	// a fallback the two disagree: the session still names the model the
+	// user chose, while the answer is coming from the fallback's model.
+	Model string
 	// Tool is set on the two events that bracket a tool invocation, and nil
 	// on every other event.
 	Tool *ToolRun
@@ -92,32 +94,38 @@ type Event struct {
 	Usage *provider.Usage
 }
 
-// Session is one conversation bound to a configuration and a provider chain.
+// Session is one conversation bound to a provider chain.
+//
+// A Session is not safe for concurrent use. Everything on it — Ask and the
+// sequence it returns, the accessors, the setters, History — must be driven
+// from one goroutine at a time. The interactive interface honours this by
+// draining an exchange on a worker goroutine and touching the session from
+// its message loop only once that exchange has closed; a caller that reads
+// History while an Ask is still yielding is reading state mid-write. The
+// session does not lock internally because the sequence an exchange returns
+// runs inside the caller's loop, and a lock held across a yield would
+// serialise nothing useful while making a deadlock easy to write.
 type Session struct {
 	retryPending bool
 	store        *Sessions
 	saveName     string
-	cfg          config.Config
-	resolve      Resolver
-	history      History
-	usage        *Usage
-	active       string
-	contexts     map[string]int
-	tools        []Tool
-}
-
-// New builds a session from resolved configuration.
-func New(cfg config.Config, resolve Resolver) *Session {
-	return &Session{
-		cfg:      cfg,
-		resolve:  resolve,
-		usage:    NewUsage(cfg.DailyCap),
-		active:   cfg.Provider,
-		contexts: make(map[string]int),
-	}
+	// opts is the session's own copy of its settings. Model overrides and
+	// learned context windows are written here and nowhere else, so nothing
+	// a session does can leak into the configuration it was built from.
+	opts    Options
+	resolve Resolver
+	history History
+	usage   *Usage
+	active  string
+	tools   []Tool
 }
 
 // History exposes the conversation for display and slash commands.
+//
+// The pointer is to live state, not a copy: /clear and the system prompt are
+// set through it. That makes it subject to the type's single-goroutine
+// contract — read it between exchanges, never while one is streaming. Callers
+// that only need to read take [History.Turns], which does copy.
 func (s *Session) History() *History { return &s.history }
 
 // Usage exposes the counters backing /usage.
@@ -146,7 +154,7 @@ func (s *Session) LoadConversation(conv SavedConversation) error {
 	if err := validateMessages(conv.Messages); err != nil {
 		return err
 	}
-	if _, ok := s.cfg.Providers[conv.Provider]; !ok {
+	if _, ok := s.opts.Providers[conv.Provider]; !ok {
 		return fmt.Errorf("saved provider %q is not configured", conv.Provider)
 	}
 	if conv.Model == "" {
@@ -154,7 +162,7 @@ func (s *Session) LoadConversation(conv SavedConversation) error {
 	}
 	s.active = conv.Provider
 	s.SetModel(conv.Model)
-	s.history = History{system: redactable(conv.System), turns: redactSavedMessages(conv.Messages)}
+	s.history = History{system: redact.Text(conv.System), turns: redactSavedMessages(conv.Messages)}
 	s.retryPending = false
 	return nil
 }
@@ -166,8 +174,8 @@ func (s *Session) Provider() string { return s.active }
 // /model can show what a user may switch to without them having to open the
 // config file to find out.
 func (s *Session) Providers() []string {
-	out := make([]string, 0, len(s.cfg.Providers))
-	for name := range s.cfg.Providers {
+	out := make([]string, 0, len(s.opts.Providers))
+	for name := range s.opts.Providers {
 		out = append(out, name)
 	}
 	sort.Strings(out)
@@ -177,7 +185,10 @@ func (s *Session) Providers() []string {
 // Credentialed reports whether a provider has a usable API key, which is what
 // separates a provider a user can switch to from one that would fail on the
 // next question.
-func (s *Session) Credentialed(name string) bool { return s.cfg.Credentialed(name) }
+func (s *Session) Credentialed(name string) bool {
+	p, ok := s.opts.Providers[name]
+	return ok && p.Credentialed
+}
 
 // Clear drops the conversation turns, keeping the system prompt and every
 // counter. /clear frees context, it does not refund the day's budget.
@@ -190,23 +201,30 @@ func (s *Session) Clear() {
 }
 
 // Model reports the model id configured for the active provider.
-func (s *Session) Model() string { return s.cfg.Providers[s.active].Model }
+func (s *Session) Model() string { return s.modelFor(s.active) }
+
+// modelFor reports the model id a named provider would be asked for. It is
+// empty for a provider that is not configured, which no caller treats as a
+// model.
+func (s *Session) modelFor(name string) string { return s.opts.Providers[name].Model }
 
 // SetProvider switches the preferred provider, as /model does. Fallbacks are
 // unchanged, so a manual switch still degrades gracefully.
 func (s *Session) SetProvider(name string) error {
-	if _, ok := s.cfg.Providers[name]; !ok {
+	if _, ok := s.opts.Providers[name]; !ok {
 		return fmt.Errorf("provider %q is not configured", name)
 	}
 	s.active = name
 	return nil
 }
 
-// SetModel overrides the model id for the active provider.
+// SetModel overrides the model id for the active provider. The override is
+// held by this session alone; the configuration it was built from is not
+// changed.
 func (s *Session) SetModel(id string) {
-	p := s.cfg.Providers[s.active]
+	p := s.opts.Providers[s.active]
 	p.Model = id
-	s.cfg.Providers[s.active] = p
+	s.opts.Providers[s.active] = p
 }
 
 // SetTools replaces the set of tools the model may invoke.
@@ -231,20 +249,26 @@ func (s *Session) definitions() []provider.Tool {
 }
 
 // SetContextWindow records a model's window so trimming can use the real size
-// instead of the conservative default.
+// instead of the conservative default. A configured context_window arrives
+// through [Options] already; this is for a window learned later, from a model
+// catalogue for instance. Non-positive values and unknown providers are
+// ignored rather than trusted.
 func (s *Session) SetContextWindow(providerName string, tokens int) {
-	if tokens > 0 {
-		s.contexts[providerName] = tokens
+	p, ok := s.opts.Providers[providerName]
+	if !ok || tokens <= 0 {
+		return
 	}
+	p.ContextWindow = tokens
+	s.opts.Providers[providerName] = p
 }
 
 // promptBudget is how many tokens of history may be sent to providerName.
 func (s *Session) promptBudget(providerName string) int {
-	window, ok := s.contexts[providerName]
-	if !ok || window <= 0 {
+	window := s.opts.Providers[providerName].ContextWindow
+	if window <= 0 {
 		window = defaultContextWindow
 	}
-	reserve := s.cfg.MaxTokens
+	reserve := s.opts.MaxTokens
 	if reserve <= 0 {
 		reserve = reservedForOutput
 	}
@@ -255,359 +279,24 @@ func (s *Session) promptBudget(providerName string) int {
 	return budget
 }
 
-// chain returns the providers to try, active first, skipping any that have no
-// usable credential. Attempting an uncredentialed provider would spend a
-// round-trip to learn what config already knows.
+// chain returns the providers to try, active first, then the fallbacks in
+// order with the active one removed so it is never tried twice, skipping any
+// that have no usable credential. Attempting an uncredentialed provider would
+// spend a round-trip to learn what the caller already knows.
 func (s *Session) chain() []string {
-	cfg := s.cfg
-	cfg.Provider = s.active
-
+	seen := map[string]bool{s.active: true}
 	var out []string
-	for _, name := range cfg.Chain() {
-		if cfg.Credentialed(name) {
+	if s.Credentialed(s.active) {
+		out = append(out, s.active)
+	}
+	for _, name := range s.opts.Fallbacks {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if s.Credentialed(name) {
 			out = append(out, name)
 		}
 	}
 	return out
-}
-
-// Ask sends prompt and streams the reply, running any tools the model asks for
-// and falling back across providers when one reports a quota or auth failure.
-//
-// The user turn is appended immediately so it appears in the transcript even
-// if every provider fails. The assistant turn is appended only once a reply
-// completes, so a failed exchange does not leave a truncated answer in history
-// that would then be sent as context on the next question.
-//
-// One question may take several remote requests: each tool the model asks for
-// has to be run locally and handed back, and only then can the model continue.
-// The whole exchange still costs one reservation against the daily cap, because
-// the user asked one question and the number of rounds is our decision, not
-// theirs.
-func (s *Session) Ask(ctx context.Context, prompt string) iter.Seq2[Event, error] {
-	return s.exchange(ctx, prompt, false)
-}
-
-// CanRetry is called only after the preceding exchange has stopped. Unknown
-// tool outcomes are never replayed or silently discarded.
-func (s *Session) CanRetry() error {
-	if !s.retryPending {
-		return errors.New("no failed or interrupted exchange to retry")
-	}
-	if err := validateMessages(s.history.Turns()); err != nil {
-		return fmt.Errorf("cannot retry: %w; review tool outcomes and start a new conversation", err)
-	}
-	return nil
-}
-
-// Retry reuses the failed turn without adding a duplicate user message. Tools
-// are withheld, including when a provider emits an unsolicited tool call.
-func (s *Session) Retry(ctx context.Context) iter.Seq2[Event, error] {
-	return s.exchange(ctx, "", true)
-}
-
-func (s *Session) exchange(ctx context.Context, prompt string, retry bool) iter.Seq2[Event, error] {
-	parent := ctx
-	return func(yield func(Event, error) bool) {
-		ctx := parent
-		if s.cfg.RequestTimeoutSeconds > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, time.Duration(s.cfg.RequestTimeoutSeconds)*time.Second)
-			defer cancel()
-		}
-		if retry {
-			if err := s.CanRetry(); err != nil {
-				yield(Event{}, err)
-				return
-			}
-		}
-		if err := s.usage.Reserve(); err != nil {
-			yield(Event{}, err)
-			return
-		}
-
-		s.retryPending = true
-		if !retry {
-			s.history.Append(provider.RoleUser, prompt)
-		}
-
-		candidates := s.chain()
-		if len(candidates) == 0 {
-			err := errors.New("no provider has a usable API key; set one of the provider key environment variables")
-			yield(Event{}, errors.Join(err, s.usage.Release()))
-			return
-		}
-
-		// total accumulates every round's tokens, so the figure shown at the
-		// end of the exchange is what the question actually cost rather than
-		// what its last leg cost. It stays nil while no provider reported
-		// anything, which is how "unknown" is distinguished from "zero".
-		var total *provider.Usage
-
-		for round := range maxToolRounds {
-			// On the last round the tools are withheld, which turns the
-			// bound into a nudge rather than a wall: the model can no
-			// longer ask for anything, so it answers.
-			var tools []provider.Tool
-			last := retry || round == maxToolRounds-1
-			if !last {
-				tools = s.definitions()
-			}
-
-			res, err := s.round(ctx, candidates, tools, yield)
-			switch {
-			case err == nil:
-				// Fall through to handling the reply.
-
-			case errors.Is(err, errStopped):
-				// The caller broke out of the loop; nothing more to do.
-				return
-
-			default:
-				if round == 0 && res.reply == "" {
-					err = errors.Join(err, s.usage.Release())
-				}
-				yield(Event{Provider: res.provider}, err)
-				return
-			}
-
-			if res.usage != nil {
-				s.usage.Record(res.provider, *res.usage)
-				if total == nil {
-					total = &provider.Usage{}
-				}
-				total.PromptTokens += res.usage.PromptTokens
-				total.CompletionTokens += res.usage.CompletionTokens
-			}
-
-			// A provider that was skipped over once will be skipped over
-			// again, so the chain is narrowed to start at whichever one
-			// answered. Retrying a spent free tier every round would burn
-			// the allowance to learn what the last round already proved.
-			if i := slices.Index(candidates, res.provider); i > 0 {
-				candidates = candidates[i:]
-			}
-
-			// No tool calls means the model answered in prose, and so does
-			// the last round: calls that arrive after the tools were
-			// withheld are ignored rather than obeyed.
-			if len(res.calls) == 0 || last {
-				s.history.Append(provider.RoleAssistant, res.reply)
-				s.retryPending = false
-				if s.store != nil {
-					if err := s.store.Save(s.saveName, s.SaveConversation()); err != nil {
-						yield(Event{}, fmt.Errorf("answer completed but saving failed: %w", err))
-						return
-					}
-				}
-				if res.finish == provider.FinishLength {
-					if !yield(Event{Provider: res.provider, Notice: "Answer reached the output limit. Ask to continue or increase --max-tokens."}, nil) {
-						return
-					}
-				}
-				yield(Event{Provider: res.provider, Done: true, Finish: res.finish, Usage: total, IgnoredToolCalls: res.calls}, nil)
-				return
-			}
-
-			s.history.AppendToolCalls(res.reply, res.calls)
-			if !s.runCalls(ctx, res.provider, res.calls, yield) {
-				return
-			}
-		}
-	}
-}
-
-// errStopped reports that the consumer abandoned the sequence. It never
-// escapes this package.
-var errStopped = errors.New("session: consumer stopped")
-
-// roundResult is one completed model reply: the prose it streamed, the tools it
-// asked for, and what the exchange cost. The provider is carried alongside so
-// that a failure can still say which adapter produced it.
-type roundResult struct {
-	finish   provider.FinishReason
-	provider string
-	reply    string
-	calls    []provider.ToolCall
-	usage    *provider.Usage
-}
-
-// round runs one model reply, walking the provider chain until one answers.
-func (s *Session) round(ctx context.Context, candidates []string, tools []provider.Tool, yield func(Event, error) bool) (roundResult, error) {
-	var errs []error
-	for i, name := range candidates {
-		if ctx.Err() != nil {
-			return roundResult{}, ctx.Err()
-		}
-
-		if i > 0 {
-			notice := fmt.Sprintf("falling back to %s after %s failed", name, candidates[i-1])
-			if len(errs) > 0 {
-				notice += ": " + provider.FailureHint(errs[len(errs)-1])
-			}
-			if !yield(Event{Notice: notice, Provider: name}, nil) {
-				return roundResult{provider: name}, errStopped
-			}
-		}
-
-		res, err := s.streamOne(ctx, name, tools, yield)
-		for attempt := 0; attempt < s.cfg.RetryAttempts && res.reply == "" && len(res.calls) == 0 && (errors.Is(err, provider.ErrUnavailable) || errors.Is(err, provider.ErrQuota)); attempt++ {
-			delay := time.Duration(s.cfg.RetryBackoffMS) * time.Millisecond
-			var quota *provider.QuotaError
-			if errors.As(err, &quota) && quota.RetryAfter > delay {
-				delay = quota.RetryAfter
-			}
-			// Long provider hints fall through to another provider instead of parking the UI.
-			if delay > 30*time.Second {
-				break
-			}
-			if !yield(Event{Provider: name, Notice: fmt.Sprintf("retrying %s in %s (%d/%d)", name, delay, attempt+1, s.cfg.RetryAttempts)}, nil) {
-				return res, errStopped
-			}
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return res, ctx.Err()
-			case <-timer.C:
-				if ctx.Err() != nil {
-					return res, ctx.Err()
-				}
-			}
-			res, err = s.streamOne(ctx, name, tools, yield)
-		}
-		if err != nil && res.reply != "" {
-			return res, fmt.Errorf("%s: response interrupted after partial output: %w", name, err)
-		}
-		switch {
-		case err == nil:
-			return res, nil
-
-		case errors.Is(err, errStopped):
-			return res, err
-
-		case errors.Is(err, provider.ErrQuota), errors.Is(err, provider.ErrAuth), errors.Is(err, provider.ErrNoModel), errors.Is(err, provider.ErrUnavailable):
-			// This provider cannot answer, but the next one may: an exhausted
-			// allowance, a credential it will not accept, no model to ask for,
-			// or a backend that is down are all faults of one provider rather
-			// than of the request.
-			errs = append(errs, err)
-
-		default:
-			// A transport or protocol failure is not something a different
-			// provider is likely to fix, and retrying would spend another
-			// free-tier request.
-			return roundResult{provider: name}, err
-		}
-	}
-
-	return roundResult{}, fmt.Errorf("all providers failed: %w", errors.Join(errs...))
-}
-
-// streamOne runs a single provider attempt, forwarding deltas through yield.
-// It returns the assembled reply, any tool calls and the reported usage, or the
-// error that ended the attempt.
-func (s *Session) streamOne(ctx context.Context, name string, tools []provider.Tool, yield func(Event, error) bool) (roundResult, error) {
-	p, err := s.resolve(name)
-	if err != nil {
-		return roundResult{provider: name}, fmt.Errorf("initialising provider %s: %w", name, err)
-	}
-
-	pc := s.cfg.Providers[name]
-	// Refused here rather than at the adapter: a request with no model comes
-	// back as a bare 400, which is what a malformed tool schema and a dozen
-	// other faults also look like. Failing locally names the provider that is
-	// short a model, and costs nothing in the free-tier request budget.
-	if pc.Model == "" {
-		return roundResult{provider: name}, &provider.NoModelError{
-			Provider: name,
-			Hint:     fmt.Sprintf("model under [providers.%s] in the config, or --model", name),
-		}
-	}
-
-	req := provider.Request{
-		Model:     pc.Model,
-		Messages:  s.history.Prompt(s.promptBudget(name)),
-		MaxTokens: s.cfg.MaxTokens,
-		Tools:     tools,
-	}
-
-	res := roundResult{provider: name}
-	var reply []byte
-	for chunk, err := range p.Stream(ctx, req) {
-		if err != nil {
-			res.reply = string(reply)
-			return res, err
-		}
-		if chunk.Usage != nil {
-			u := *chunk.Usage
-			res.usage = &u
-		}
-		if chunk.Finish != provider.FinishNone {
-			res.finish = chunk.Finish
-		}
-		// The adapter reassembles fragmented calls, so anything arriving
-		// here is already whole and can simply be collected.
-		res.calls = append(res.calls, chunk.ToolCalls...)
-		if chunk.Delta == "" {
-			continue
-		}
-		reply = append(reply, chunk.Delta...)
-		if !yield(Event{Delta: chunk.Delta, Provider: name}, nil) {
-			return roundResult{provider: name}, errStopped
-		}
-	}
-	res.reply = string(reply)
-	return res, nil
-}
-
-// runCalls executes each call in turn, recording the outcome in history and
-// bracketing it with a start and a finish event. It reports whether the
-// consumer is still listening.
-//
-// Calls run sequentially rather than concurrently: a later call in the same
-// batch often depends on what an earlier one found, and the transcript reads as
-// a sequence.
-func (s *Session) runCalls(ctx context.Context, providerName string, calls []provider.ToolCall, yield func(Event, error) bool) bool {
-	for _, c := range calls {
-		start := &ToolRun{ID: c.ID, Name: c.Name, Arguments: c.Arguments}
-		if !yield(Event{Provider: providerName, Tool: start}, nil) {
-			return false
-		}
-
-		result, err := s.invoke(ctx, c)
-
-		done := &ToolRun{ID: c.ID, Name: c.Name, Arguments: c.Arguments, Finished: true}
-		// A failed tool is reported to the model as its result, not raised
-		// as an error: the model is the only party that can correct a bad
-		// argument, and it can only do that if it is told what went wrong.
-		// The provider would reject the next request outright if a call
-		// were left without a matching result.
-		if err != nil {
-			done.Err = err.Error()
-			s.history.AppendToolResult(c.ID, err.Error())
-		} else {
-			done.Result = result
-			s.history.AppendToolResult(c.ID, result)
-		}
-
-		if !yield(Event{Provider: providerName, Tool: done}, nil) {
-			return false
-		}
-	}
-	return true
-}
-
-// invoke runs the tool a call names.
-//
-// An unknown name is an error from the tool rather than a failure of the
-// exchange: models do occasionally invent a tool, and the recoverable answer is
-// to tell it so.
-func (s *Session) invoke(ctx context.Context, c provider.ToolCall) (string, error) {
-	for _, t := range s.tools {
-		if t.Definition.Name == c.Name {
-			return t.Run(ctx, c.Arguments)
-		}
-	}
-	return "", fmt.Errorf("no tool named %q is available", c.Name)
 }

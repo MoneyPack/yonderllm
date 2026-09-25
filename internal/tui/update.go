@@ -9,7 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 // Update satisfies tea.Model.
@@ -26,10 +26,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleEvent(msg)
 
 	case activityTickMsg:
-		if !m.busy || msg.seq != m.seq {
+		if msg.seq != m.seq || (!m.busy && !m.unwinding) {
 			return m, nil
 		}
-		m.spinner++
+		if m.busy {
+			m.spinner++
+		}
 		return m, waitForStream(m.current)
 
 	case streamClosedMsg:
@@ -38,10 +40,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.seq {
 			return m, nil
 		}
-		m.finish()
-		if m.sess.CanRetry() == nil {
-			m.append(block{kind: blockNotice, text: "answer interrupted — /retry requests an answer with tools disabled"})
-		}
+		m.closed()
+		return m, nil
+
+	case commandDoneMsg:
+		m.commandDone(msg)
 		return m, nil
 
 	case approvalRequestMsg:
@@ -66,11 +69,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// is checked before anything else so that ctrl+c, Enter and the textarea
 	// cannot answer it by accident, and so that the answer is always one
 	// keystroke rather than a keystroke aimed at a hidden input.
+	//
+	// A key that lands after the answer has gone but before its record has
+	// come back was aimed at the question, not at the prompt, so it is
+	// dropped rather than typed. This is also what keeps a quick "y" then
+	// "n" from denying a call the tool was already told it could make.
+	if m.decided != "" {
+		return m, nil
+	}
 	if m.asking {
 		if allowsApproval(msg) && (!m.ready || m.height < headerHeight+footerHeight+inputHeight+minViewport || m.width < 20) {
 			return m, nil
 		}
-		return m, answerApproval(m.question, allowsApproval(msg))
+		return m, m.answer(allowsApproval(msg))
 	}
 
 	switch msg.Type {
@@ -95,13 +106,29 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		return m, cmd
 
-	case tea.KeyPgUp, tea.KeyPgDown:
+	case tea.KeyPgUp:
 		// The textarea would swallow these to move its own cursor, but
 		// with a three-line input there is nothing to page through
-		// there and everything to page through in the transcript.
-		var cmd tea.Cmd
-		m.view, cmd = m.view.Update(msg)
-		return m, cmd
+		// there and everything to page through in the transcript. The
+		// viewport is told directly rather than handed the key, since
+		// its own bindings were removed so that typing cannot scroll.
+		m.view.PageUp()
+		return m, nil
+
+	case tea.KeyPgDown:
+		m.view.PageDown()
+		return m, nil
+
+	case tea.KeyCtrlHome, tea.KeyCtrlEnd:
+		// The textarea binds these to the start and end of the input,
+		// which alt+< and alt+> still reach; three lines of prompt need
+		// them far less than a long transcript does.
+		if msg.Type == tea.KeyCtrlHome {
+			m.view.GotoTop()
+		} else {
+			m.view.GotoBottom()
+		}
+		return m, nil
 	}
 
 	return m.forward(msg)
@@ -134,6 +161,13 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		m.append(block{kind: blockNotice, text: "still answering — press ctrl+c to stop"})
 		return m, nil
 	}
+	// A slash command working off the loop will report into the transcript
+	// when it finishes; anything sent before then would land around its
+	// result in an order nobody chose, so the input waits its turn.
+	if m.command != "" {
+		m.append(block{kind: blockNotice, text: "still running " + m.command + " — send again once it has finished"})
+		return m, nil
+	}
 	// Cancellation releases the keyboard before the worker has necessarily
 	// released Session. Preserve input until all its reads/writes have ended.
 	if m.stopping() {
@@ -153,9 +187,18 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 
 // handleEvent applies one packet from the stream in flight.
 func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
-	// Packets from a cancelled or superseded exchange are dropped, but the
-	// command is not re-issued for them: that stream's reader ends here.
-	if msg.seq != m.seq || !m.busy {
+	// Packets from a superseded exchange are dropped, and the command is
+	// not re-issued for them: that stream's reader ends here.
+	if msg.seq != m.seq {
+		return m, nil
+	}
+	// Packets from the cancelled exchange are dropped too, but its reader
+	// carries on: the close is what says the worker has stopped, and
+	// nothing else would ever observe it.
+	if !m.busy {
+		if m.unwinding {
+			return m, waitForStream(m.current)
+		}
 		return m, nil
 	}
 
@@ -195,8 +238,10 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 			m.answered = packet.event.Provider
 		}
 		if packet.event.Delta != "" {
+			// Only the reply in flight changed, so only it is
+			// redrawn; the committed blocks come from the cache.
 			m.pending += packet.event.Delta
-			m.refresh()
+			m.draw()
 		}
 	}
 
@@ -205,10 +250,18 @@ func (m model) handleEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 type activityTickMsg struct{ seq int }
 
-// forward hands a message to the focused child components.
+// forward hands a message to the child components.
+//
+// Keys go to the textarea alone. The viewport has bindings of its own for
+// letters and arrows, and handing it the same keystroke would scroll the
+// transcript with every character typed into the prompt; it is paged by the
+// explicit keys in handleKey instead. Everything else — blink ticks, mouse
+// events — reaches both.
 func (m model) forward(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var inputCmd, viewCmd tea.Cmd
 	m.input, inputCmd = m.input.Update(msg)
-	m.view, viewCmd = m.view.Update(msg)
+	if _, isKey := msg.(tea.KeyMsg); !isKey {
+		m.view, viewCmd = m.view.Update(msg)
+	}
 	return m, tea.Batch(inputCmd, viewCmd)
 }

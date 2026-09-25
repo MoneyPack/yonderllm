@@ -1,0 +1,26 @@
+# Dependabot keeps the two things CI depends on but nobody edits by hand
+# current: the Go module graph and the pinned GitHub Actions. Weekly is often
+# enough for a project with eight direct dependencies, and batching the checks
+# to one day keeps update PRs from arriving one at a time all week.
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    # Direct and indirect updates arrive as one PR each so a patch bump to a
+    # transitive dependency does not need its own review.
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

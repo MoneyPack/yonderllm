@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoneyPack/yonderllm/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"yonderllm/internal/session"
 )
 
 // A welcome is local presentation: it must not obscure a resumed transcript,
@@ -29,6 +29,10 @@ func TestWelcomeYieldsToSessionActivity(t *testing.T) {
 			case "transcript":
 				n.append(block{kind: blockUser, text: "Existing conversation"})
 			}
+			// The welcome is chosen when the transcript is drawn, not
+			// when the frame is read, so a state poked in directly is
+			// followed by the redraw every real state change brings.
+			n.refresh()
 			if strings.Contains(n.View(), introduction) {
 				t.Error("welcome obscures session activity")
 			}

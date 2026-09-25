@@ -9,12 +9,19 @@ and `BuildDate` using Go linker flags:
 
 ```sh
 mkdir -p bin
-go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.2.0 -X yonderllm/internal/cli.BuildCommit=COMMIT -X yonderllm/internal/cli.BuildDate=UTC_DATE" -o bin/yonderllm ./cmd/yonderllm
+go build -ldflags "-s -w -X github.com/MoneyPack/yonderllm/internal/cli.Version=0.2.0 -X github.com/MoneyPack/yonderllm/internal/cli.BuildCommit=COMMIT -X github.com/MoneyPack/yonderllm/internal/cli.BuildDate=UTC_DATE" -o bin/yonderllm ./cmd/yonderllm
 ```
 
 Substitute the actual release version, commit and UTC date. This example does not
 announce a published release. Go's VCS build settings provide metadata when linker
-values are absent.
+values are absent, and a binary from `go install .../cmd/yonderllm@vX.Y.Z` reports
+the module version Go embedded rather than `dev`.
+
+Published releases are produced by `.github/workflows/release.yml` when a `v*`
+tag is pushed: it re-runs the test suite and `govulncheck`, cross-compiles the
+six supported targets with `CGO_ENABLED=0 -trimpath` and the flags above, and
+uploads the binaries with a `SHA256SUMS.txt` to a GitHub release. A tag with a
+pre-release suffix (`v0.2.0-rc.3`) is marked as a pre-release.
 
 ## Version policy
 
@@ -23,7 +30,11 @@ contracts with release notes. At 1.x, incompatible public flag/schema/config
 changes require a major version. Patch releases fix defects without intentionally
 changing contracts. Provider/model availability is controlled by third parties.
 
-NDJSON schema 1 adds `schema_version: 1` to each event. Consumers must tolerate
+NDJSON schema 1 adds `schema_version: 1` to each event. Every event also
+carries `provider` and `model`, naming the provider and model that produced
+that event (the fallback's after a fallback, not the one originally asked
+for); this was corrected within schema 1 because it changed a value, not a
+field's type or presence. Consumers must tolerate
 unknown fields/event types and require `done` for success after streaming starts.
 `error` is terminal; process exit status remains authoritative. A field removal,
 type change, or changed meaning requires a new schema version. Plain TUI/prose

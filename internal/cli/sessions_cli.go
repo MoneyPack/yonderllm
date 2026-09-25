@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/session"
 )
 
 // openSessions returns the store rooted beside user configuration, creating it if

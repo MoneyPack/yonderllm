@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoneyPack/yonderllm/internal/perm"
 	"github.com/charmbracelet/x/ansi"
-	"yonderllm/internal/perm"
 )
 
 func TestUntrustedBlocksEscapeTerminalInstructions(t *testing.T) {

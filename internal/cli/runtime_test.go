@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/MoneyPack/yonderllm/internal/config"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
-	"yonderllm/internal/config"
-	"yonderllm/internal/provider"
 )
 
 func TestResolverAppliesStrictServerOptionsAndHeaderEnv(t *testing.T) {

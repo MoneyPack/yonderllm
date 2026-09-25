@@ -28,14 +28,26 @@ runtime dependencies, no VPS, friendly to free and cheap tiers.
 ## 3. Repository layout
 
 ```
-cmd/yonderllm/        entry point, flag parsing, mode selection
-internal/tui/         full-screen terminal UI
-internal/cli/         subcommands: ask, models, providers, config, run
-internal/provider/    adapter interface + per-provider implementations
-internal/session/     conversation history, context trimming, token accounting
-internal/perm/        permission modes and policy enforcement
-internal/workspace/   scoped read / search / patch operations
-internal/config/      TOML parsing, env key resolution, provider registry
+cmd/yonderllm/         entry point; delegates to internal/cli
+cmd/yonder-eval/       development-only provider evaluation runner (docs/EVALUATION.md)
+internal/cli/          subcommands (ask, run, models, providers, config, sessions,
+                       version, completion), flags, help, defaults→file→env→flags resolver
+internal/tui/          full-screen terminal UI (Bubble Tea)
+internal/config/       TOML parsing, validation, env key names, provider registry
+internal/adapters/     provider config → provider adapter factory
+internal/provider/     adapter interface + the OpenAI-compatible chat implementation
+internal/session/      conversation history, context trimming, fallback/retry, tool
+                       rounds, token accounting, saved conversations, daily-cap store
+internal/perm/         permission modes and policy enforcement
+internal/tools/        the model's tools (read_file, search_files, write_file,
+                       run_command), gated by perm and collecting approvals
+internal/workspace/    os.Root-scoped read / search / write; credential and hook
+                       filename classification
+internal/shell/        argv-only process execution, destructive/interpreter tables,
+                       credential scrubbing of the child environment
+internal/redact/       credential-pattern redaction for errors and saved history
+internal/terminaltext/ visible escaping of terminal control bytes
+internal/evaluation/   the evaluation suite behind cmd/yonder-eval
 ```
 
 ## 4. Interfaces
@@ -50,16 +62,38 @@ Three ways to drive the same core:
 
 ### CLI subcommands
 
-- `ask <prompt>` — one-shot text completion. `run --json` for machine-readable output.
-- `models` — list free and cheap models on the active provider. `--all` includes
-  models priced above the cheap tier; `--json` for machine-readable output.
-- `providers` — list configured providers and their credential status.
-- `config` — show resolved config and its source (file vs env vs default).
-- `run` — start the TUI explicitly (same as bare invocation).
+- `ask [prompt]` — one-shot text completion; the prompt comes from the
+  argument, or from stdin when there is none. `--stdin` appends piped input to
+  the argument. `-q/--quiet` suppresses provider notices on stderr.
+- `run [prompt]` — the headless one-shot. Plain output is identical to `ask`;
+  `--json` (or `output_format = "json"`) emits schema-1 NDJSON events, including
+  tool calls. With no prompt argument the prompt is read from stdin. Only when
+  there is no prompt, no `--json`, no `--stdin` *and* stdin is a terminal does
+  `run` open the TUI instead, as a second door to the bare invocation.
+- `models [provider]` — list free and cheap models on a provider (the active
+  one by default). `--all` includes models priced above the cheap tier;
+  `--json` for machine-readable output.
+- `providers` — list configured providers, in fallback order, and their
+  credential status. `--json` for machine-readable output.
+- `config path|show|init` — locate the config file, print the effective
+  configuration after all layers, or write a commented starter file
+  (`init --force` overwrites).
+- `sessions` / `sessions delete <name>` — list or remove saved conversations.
+- `version` — version, commit, build date, platform, and NDJSON schema;
+  `--json` for machine-readable output. `--version` prints the short form.
+- `completion bash|zsh|fish|powershell` — shell completion scripts.
+
+Persistent flags on every command: `-p/--provider`, `-m/--model`, `--mode`,
+`--max-tokens`, `--daily-cap`, `--config`, `--yes` (agent mode only),
+`--resume <name>`, `--last`, `--save <name>`, `--no-save`.
 
 ### Slash commands (TUI)
 
-`/model`, `/clear`, `/read`, `/search`, `/usage`, `/help`.
+`/model`, `/mode`, `/retry`, `/save`, `/clear`, `/read`, `/search`, `/usage`,
+`/help`. Keys: `enter` sends, `ctrl+j` inserts a newline, `pgup`/`pgdn` scroll
+the transcript, `ctrl+home`/`ctrl+end` jump to its top or bottom, `ctrl+c`
+stops a reply in flight or quits; while a tool call awaits approval, `y`
+allows and any other key denies.
 
 `/mode [chat|code|agent]` reports or changes permissions while idle, rebuilding
 the tool set and header together without clearing history. A change uses
@@ -127,16 +161,27 @@ Mode is displayed prominently at all times. Sessions start in **Chat**.
 | Mode | Filesystem | Shell | Approval |
 |---|---|---|---|
 | **Chat** | none | none | n/a |
-| **Code** | read + search; proposes patches | none | required before any write |
-| **Agent** | read, search, write | yes | configurable; destructive commands always confirmed |
+| **Code** | read + search; `write_file` | none | required before any write |
+| **Agent** | read, search, write | `run_command` | per call, or in advance with `--yes`; recognised destructive/interpreter commands, hook-like writes and credential-like reads always confirmed |
+
+The tools are `read_file`, `search_files`, `write_file` and `run_command`,
+built in `internal/tools` from the policy: a capability the mode denies is never
+described to the model, and one the mode would ask about is offered only when
+an approver exists.
 
 Rules that hold in every mode:
 
 - All paths are resolved and confined to the workspace root. Escapes are denied.
+  Writes under `.git/` are refused outright; reads under `.git/` and other
+  version-control, dependency and build-output directories are refused.
 - Obvious secrets (API keys, tokens, `.env` values) are redacted before any
-  content reaches a provider.
-- Destructive shell commands require an explicit confirmation regardless of the
-  configured approval level.
+  content reaches a provider. Files named like credentials are refused in Code
+  and confirmed in Agent, even under `--yes`.
+- Recognised destructive shell commands, and every shell/interpreter/launcher,
+  require an explicit confirmation regardless of the configured approval level.
+  Recognition is by name table, not semantics; see [safety](docs/SAFETY.md).
+- Child processes do not inherit the environment variables the configuration
+  names as credentials, nor a short list of well-known key names.
 
 ### Approval
 
@@ -155,7 +200,8 @@ a diff for a write, the exact argument vector for an exec. Rules:
   blindly.
 - **Approval is per call, never remembered.** Approving one write does not
   approve the next. Only `agent` mode with auto-approval configured skips the
-  prompt, and destructive commands are confirmed even then.
+  prompt, and destructive commands are confirmed even then. A question still
+  open when the exchange ends is resolved as denied.
 
 Where no approver exists — `--json` output, a pipe, any non-interactive run —
 a capability the mode would ask about is withheld from the model entirely
@@ -202,14 +248,19 @@ repeat a quota/5xx-failed model round before text or calls arrive; completed too
 results are reused without executing them again. Long Retry-After hints skip
 same-provider retry. Explicit `daily_cap = 0` disables the local cap.
 
-Providers accept `omit_stream_options` and environment-backed X-prefixed metadata
-headers via `header_env`. Redirects and URLs with credentials/query/fragment are
-refused. Custom compatible providers require no new compiled adapter.
+Providers accept `omit_stream_options`, environment-backed X-prefixed metadata
+headers via `header_env`, and `context_window` (a positive token count). When
+`context_window` is set, history is trimmed to that window less the output
+reservation (`max_tokens`, or 1024 when unset); when it is absent the session
+assumes a conservative 8192-token window. Redirects and URLs with
+credentials/query/fragment are refused. Custom compatible providers require no
+new compiled adapter.
 
 ## Compatibility
 
-`run --json` emits schema 1 events with `schema_version: 1`. Failed output writes
-stop the exchange with a nonzero exit. `version --json` exposes version, build,
+`run --json` emits schema 1 events with `schema_version: 1`; every event names
+the `provider` and `model` that produced it, which after a fallback is the
+fallback's. Failed output writes stop the exchange with a nonzero exit. `version --json` exposes version, build,
 platform, Go and protocol metadata. See [compatibility](docs/COMPATIBILITY.md).
 
 ## 9. Testing

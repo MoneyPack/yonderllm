@@ -245,6 +245,49 @@ func TestLoadRejectsBroadConfigPermissions(t *testing.T) {
 	}
 }
 
+// TestLoadRefusesNonRegularConfigFile covers the file-type check that runs
+// before the file is opened: a directory, or anything else that is not a
+// plain file, is refused on every platform with an error that says so, rather
+// than being opened and reported as a read failure.
+func TestLoadRefusesNonRegularConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("a directory was accepted as the config file")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") || !strings.Contains(err.Error(), dir) {
+		t.Fatalf("error = %v, want it to name the path and the file type", err)
+	}
+}
+
+// TestLoadRefusesSymlinkedConfigFile is the reason the check uses Lstat: a
+// link is refused even when its target is a perfectly good 0600 config, since
+// checking the link's own mode would otherwise say nothing about the bytes
+// actually read. Windows only grants symlink creation to some users, so the
+// test skips where it cannot make one.
+func TestLoadRefusesSymlinkedConfigFile(t *testing.T) {
+	target := writeConfig(t, `provider = "gemini"`)
+	link := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot create symlinks here: %v", err)
+		}
+		t.Fatal(err)
+	}
+
+	// The target on its own loads fine, so a refusal is about the link.
+	if cfg, err := Load(target); err != nil || cfg.Provider != "gemini" {
+		t.Fatalf("target Load = %+v, %v", cfg.Provider, err)
+	}
+	_, err := Load(link)
+	if err == nil {
+		t.Fatal("a symlinked config file was followed")
+	}
+	if !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("error = %v, want it to say the file is a symbolic link", err)
+	}
+}
+
 // TestEnvModelOverridesFile covers the YONDERLLM_MODEL branch of applyEnv,
 // which the provider-only override test leaves untouched.
 func TestEnvModelOverridesFile(t *testing.T) {

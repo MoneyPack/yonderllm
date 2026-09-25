@@ -1,10 +1,13 @@
 // This file implements the slash commands: the small set of things a session
-// can be asked to do that are not questions for a model. They all run locally
-// and return immediately, so none of them start a stream; each one answers by
-// appending a block to the transcript, which is the same way a reply arrives.
+// can be asked to do that are not questions for a model. They all run locally,
+// so none of them start a stream; each one answers by appending a block to the
+// transcript, which is the same way a reply arrives. The ones that touch the
+// disk — /read, /search, /save — do so inside a command rather than in Update,
+// since a slow tree walk on the message loop is a frozen screen.
 package tui
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -13,9 +16,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yonderllm/internal/perm"
-	"yonderllm/internal/tools"
-	"yonderllm/internal/workspace"
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/tools"
+	"github.com/MoneyPack/yonderllm/internal/workspace"
 )
 
 // maxShownLines caps how much of a file /read puts on screen. A file the
@@ -52,6 +56,7 @@ Keys
   enter                  send
   ctrl+j                 newline
   pgup / pgdn            scroll the transcript
+  ctrl+home / ctrl+end   jump to the top or bottom of the transcript
   ctrl+c                 stop a reply in flight, or quit
 
 Keys while a call is waiting on you
@@ -86,11 +91,11 @@ func (m model) runCommand(text string) (tea.Model, tea.Cmd) {
 		cmd := m.retry(args)
 		return m, cmd
 	case "/read":
-		m.readFile(remainder(text))
+		return m, m.readFile(remainder(text))
 	case "/search":
-		m.searchFiles(remainder(text))
+		return m, m.searchFiles(remainder(text))
 	case "/save":
-		m.saveConversation(remainder(text))
+		return m, m.saveConversation(remainder(text))
 	default:
 		m.append(block{kind: blockError, text: fmt.Sprintf("unknown command %q; try /help", name)})
 	}
@@ -122,6 +127,9 @@ func (m *model) retry(args []string) tea.Cmd {
 	}
 	m.append(block{kind: blockNotice, text: "retrying the answer with tools disabled"})
 	m.seq++
+	// The old worker is known to have stopped (checked above), so its
+	// unwinding is over whether or not its close has been seen yet.
+	m.unwinding = false
 	m.busy = true
 	m.pending = ""
 	m.answered = m.sess.Provider()
@@ -174,23 +182,66 @@ func (m *model) applyMode(args []string) {
 	m.append(block{kind: blockNotice, text: "mode is now " + mode.String() + "; writes and commands require approval where permitted"})
 }
 
+// commandDoneMsg delivers the outcome of a slash command that did its work off
+// the message loop. The id names the placeholder the result replaces.
+type commandDoneMsg struct {
+	id    string
+	block block
+}
+
+// begin records that a slash command has gone to work off the loop and puts a
+// placeholder in the transcript for its result to take the place of. The
+// placeholder is what keeps a slow search from looking like a hang, in the same
+// way a tool call is announced before it runs.
+func (m *model) begin(name, activity string) string {
+	m.commands++
+	id := fmt.Sprintf("command-%d", m.commands)
+	m.command = name
+	m.append(block{kind: blockNotice, id: id, text: activity + "…"})
+	return id
+}
+
+// commandDone writes a finished command's result over its placeholder and gives
+// Enter back. The result keeps the placeholder's id so that the transcript ends
+// up with one entry for the command rather than an announcement and an answer.
+func (m *model) commandDone(msg commandDoneMsg) {
+	m.command = ""
+	b := msg.block
+	b.id = msg.id
+	if !m.replace(blockNotice, msg.id, b) {
+		m.append(b)
+	}
+}
+
 // saveConversation writes the current conversation to the on-disk store under
 // the given name. With no name, or with no store (a test model), it reports
 // rather than failing silently.
-func (m *model) saveConversation(name string) {
+//
+// The conversation is captured here, on the loop, because it is read from the
+// session; only the write to disk happens in the command.
+func (m *model) saveConversation(name string) tea.Cmd {
 	if m.sessions == nil {
 		m.append(block{kind: blockError, text: "saving is unavailable in this session"})
-		return
+		return nil
 	}
 	if strings.TrimSpace(name) == "" {
 		m.append(block{kind: blockError, text: "usage: /save <name>"})
-		return
+		return nil
 	}
-	if err := m.sessions.Save(name, m.sess.SaveConversation()); err != nil {
-		m.append(block{kind: blockError, text: "save failed: " + err.Error()})
-		return
+
+	id := m.begin("/save", "saving conversation "+name)
+	store, conv := m.sessions, m.sess.SaveConversation()
+	return func() tea.Msg {
+		return commandDoneMsg{id: id, block: saveBlock(store, name, conv)}
 	}
-	m.append(block{kind: blockNotice, text: "saved conversation " + name})
+}
+
+// saveBlock writes the conversation and reports how it went.
+func saveBlock(store *session.Sessions, name string, conv session.SavedConversation) block {
+	if err := store.Save(name, conv); err != nil {
+		return block{kind: blockError, text: "save failed: " + err.Error()}
+	}
+	return block{kind: blockNotice, text: "saved conversation " + name}
 }
 
 // remainder returns everything after the command word, with only the space that
@@ -219,30 +270,40 @@ func (m *model) clearSession() {
 }
 
 // readFile shows a file from the working directory, if this mode is allowed to
-// read one. The workspace is opened for the command and closed again rather
-// than held open for the session, because the working directory is only of
-// interest while a command is using it, and a handle kept across a whole
-// session would outlive whatever made it relevant.
-func (m *model) readFile(name string) {
+// read one. The read happens in the returned command; the mode is captured now
+// so that a /mode typed while it runs cannot change what it was allowed to do.
+func (m *model) readFile(name string) tea.Cmd {
 	if name == "" {
 		m.append(block{kind: blockError, text: "usage: /read <file>"})
-		return
+		return nil
 	}
 
-	ws, err := workspace.Current(perm.New(m.mode))
+	id := m.begin("/read", "reading "+name)
+	mode := m.mode
+	return func() tea.Msg {
+		return commandDoneMsg{id: id, block: readBlock(mode, name)}
+	}
+}
+
+// readBlock reads the file and builds the block that shows it, or the error
+// that explains why it cannot be shown.
+//
+// The workspace is opened for the command and closed again rather than held
+// open for the session, because the working directory is only of interest
+// while a command is using it, and a handle kept across a whole session would
+// outlive whatever made it relevant.
+func readBlock(mode perm.Mode, name string) block {
+	ws, err := workspace.Current(perm.New(mode))
 	if err != nil {
-		m.append(block{kind: blockError, text: err.Error()})
-		return
+		return block{kind: blockError, text: err.Error()}
 	}
 	defer ws.Close()
 
 	data, err := ws.ReadFile(name)
 	if err != nil {
-		m.append(block{kind: blockError, text: err.Error()})
-		return
+		return block{kind: blockError, text: err.Error()}
 	}
-
-	m.append(block{kind: blockInfo, text: fileView(name, string(data))})
+	return block{kind: blockInfo, text: fileView(name, string(data))}
 }
 
 // fileView renders a file under a heading naming it, shortened to the first
@@ -279,33 +340,42 @@ func fileView(name, content string) string {
 }
 
 // searchFiles looks for literal text across the working directory, if this mode
-// is allowed to search it.
-func (m *model) searchFiles(query string) {
+// is allowed to search it. The walk happens in the returned command, which is
+// the whole point: a search over a large tree is the slowest thing the
+// interface does locally, and it must not stop the screen redrawing.
+func (m *model) searchFiles(query string) tea.Cmd {
 	if query == "" {
 		m.append(block{kind: blockError, text: "usage: /search <text>"})
-		return
+		return nil
 	}
 
-	ws, err := workspace.Current(perm.New(m.mode))
+	id := m.begin("/search", fmt.Sprintf("searching for %q", query))
+	mode := m.mode
+	return func() tea.Msg {
+		return commandDoneMsg{id: id, block: searchBlock(mode, query)}
+	}
+}
+
+// searchBlock runs the search and builds the block that reports it.
+func searchBlock(mode perm.Mode, query string) block {
+	ws, err := workspace.Current(perm.New(mode))
 	if err != nil {
-		m.append(block{kind: blockError, text: err.Error()})
-		return
+		return block{kind: blockError, text: err.Error()}
 	}
 	defer ws.Close()
 
-	matches, err := ws.Search(query)
+	// There is no cancellation to offer: the command runs to completion
+	// or the program exits, and nothing in between can reach it.
+	matches, err := ws.Search(context.Background(), query)
 	if err != nil {
-		m.append(block{kind: blockError, text: err.Error()})
-		return
+		return block{kind: blockError, text: err.Error()}
 	}
 	if len(matches) == 0 {
 		// Finding nothing is an answer, not a failure, so it is reported
 		// as a notice rather than an error.
-		m.append(block{kind: blockNotice, text: fmt.Sprintf("no matches for %q", query)})
-		return
+		return block{kind: blockNotice, text: fmt.Sprintf("no matches for %q", query)}
 	}
-
-	m.append(block{kind: blockInfo, text: matchView(query, matches)})
+	return block{kind: blockInfo, text: matchView(query, matches)}
 }
 
 // matchView renders search results as path:line: text, one per line, under a

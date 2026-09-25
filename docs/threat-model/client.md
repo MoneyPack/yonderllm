@@ -26,9 +26,11 @@ Catalogue reads use a limit+one sentinel and fail before JSON decoding.
 Availability: LOW_CRITICALITY. Assets: workspace integrity, other user files,
 inherited credentials, process privileges. Model call names/arguments are
 untrusted. Chat has no tools. Code permits reads/searches and approved writes;
-agent additionally permits approved exec. Automatic approval is explicit and
-destructive-command classification remains heuristic. Tool definitions are not
-an authorization boundary: tools and lower layers enforce policy.
+agent additionally permits approved exec. Automatic approval (`--yes`) is
+explicit, agent-only, and does not waive confirmation of recognised destructive
+or interpreter commands, hook-like writes, or credential-file reads;
+classification remains heuristic. Tool definitions are not an authorization
+boundary: tools and lower layers enforce policy.
 
 `os.Root` confines built-in file access, including symlink escapes. It does not
 isolate processes or exclude all sensitive files inside the workspace. Reads
@@ -37,9 +39,10 @@ Replacement with a special file during open needs deeper cross-platform
 verification. Writes recheck cancellation and the original content snapshot but are not
 transactional compare-and-swap; a hostile concurrent writer can still race.
 
-Commands use argv without implicit shell parsing, inherit environment, have
-30-second contexts and 1 MiB captured-output caps. Explicitly launching an
-interpreter is still possible after approval. Parent cancellation is not a
+Commands use argv without implicit shell parsing, have 30-second contexts and
+1 MiB captured-output caps, and inherit the environment minus configured
+credential variables and a well-known list. Explicitly launching an interpreter
+is still possible after confirmation. Parent cancellation is not a
 portable descendant-process sandbox/kill guarantee. Descendant pipe inheritance
 is bounded by a one-second drain grace period; process-tree termination and
 filesystem-operation cancellation remain open follow-up checks.

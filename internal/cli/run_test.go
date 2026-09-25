@@ -10,6 +10,9 @@
 package cli
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -176,6 +179,56 @@ func TestRunJSONFollowsTheModelFlag(t *testing.T) {
 	done := lastEventOfType(t, r.stdout, "done")
 	if done.Model != "llama-3.3-70b-versatile" {
 		t.Errorf("model = %q, want %q", done.Model, "llama-3.3-70b-versatile")
+	}
+}
+
+// After a fallback the answer comes from another provider's model, and every
+// event on the wire must say so. Stamping the session's own model — the one
+// the user chose — would misattribute the whole answer.
+func TestRunJSONNamesTheFallbackModelAfterAFallback(t *testing.T) {
+	answering := newStub(t, "from the fallback")
+	h := newHarness(t, answering)
+
+	// The preferred provider is exhausted: every request is a 429, which
+	// is the fallback trigger.
+	exhausted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(exhausted.Close)
+
+	path := writeConfig(t, h.dir, fmt.Sprintf(`fallbacks = ["gemini"]
+
+[providers.groq]
+base_url = %q
+model = "llama-3.1-8b-instant"
+api_key_env = %q
+
+[providers.gemini]
+base_url = %q
+model = "gemini-fallback-model"
+api_key_env = %q
+`, exhausted.URL, testKeyEnv, answering.server.URL, testKeyEnv))
+
+	r := runBare(t, "--config", path, "run", "--json", "hello")
+
+	wantCode(t, r, 0)
+	events := decodeNDJSON[wireEvent](t, r.stdout)
+	if len(events) < 3 {
+		t.Fatalf("want at least a notice, a delta and a done event, got %d\n--- stdout ---\n%s", len(events), r.stdout)
+	}
+	if events[0].Type != "notice" || events[0].Provider != "gemini" || events[0].Model != "gemini-fallback-model" {
+		t.Errorf("first event = %+v, want a gemini notice carrying gemini-fallback-model", events[0])
+	}
+	for _, ev := range events[1:] {
+		if ev.Provider != "gemini" {
+			t.Errorf("%s event names provider %q, want gemini", ev.Type, ev.Provider)
+		}
+		if ev.Model != "gemini-fallback-model" {
+			t.Errorf("%s event names model %q, want gemini-fallback-model", ev.Type, ev.Model)
+		}
+	}
+	if got := joinDeltas(t, r.stdout); got != "from the fallback" {
+		t.Errorf("deltas = %q, want the fallback's answer", got)
 	}
 }
 

@@ -2,20 +2,22 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"sync"
 
-	"yonderllm/internal/config"
-	"yonderllm/internal/perm"
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
-	"yonderllm/internal/tools"
+	"github.com/MoneyPack/yonderllm/internal/adapters"
+	"github.com/MoneyPack/yonderllm/internal/config"
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/tools"
 )
 
 // This file is the composition root's narrowest part: the one function that
 // turns configuration into a live adapter. Nothing below the cli package knows
 // which concrete provider types exist, and session reaches them only through
-// the [session.Resolver] built here.
+// the [session.Resolver] built here; the adapter itself is built by the
+// adapters package, which is the only code that knows the mapping from config
+// fields to adapter options.
 
 // newResolver returns a resolver over cfg.
 //
@@ -56,18 +58,10 @@ func newResolver(cfg config.Config) session.Resolver {
 			return nil, fmt.Errorf("provider %q has no base_url", name)
 		}
 
-		// Every provider yonderllm ships with speaks the [OI]
-		// chat-completions dialect, so one adapter covers them all. A
-		// backend that does not fit gets its own constructor here, and
-		// nothing outside this switch has to change.
-		opts := []provider.ChatOption{}
-		for header, env := range pc.HeaderEnv {
-			opts = append(opts, provider.WithHeader(header, os.Getenv(env)))
-		}
-		if pc.OmitStreamOptions {
-			opts = append(opts, provider.WithoutStreamOptions())
-		}
-		p := provider.NewChatCompat(name, pc.BaseURL, pc.APIKey(), opts...)
+		// The field-to-option mapping lives in adapters so that this
+		// resolver and the evaluation harness cannot drift apart on
+		// which settings a provider honours.
+		p := adapters.New(name, pc)
 		cache[name] = p
 		return p, nil
 	}
@@ -139,8 +133,29 @@ func (e *env) newSessionFor(cfg config.Config, mode perm.Mode, approver tools.Ap
 	if err != nil {
 		return nil, fmt.Errorf("locate daily usage storage: %w", err)
 	}
-	sess := session.New(cfg, newResolver(cfg))
+	// The session gets a value copied out of cfg rather than cfg itself:
+	// per-provider model and context_window settings travel in, and a
+	// /model switch made later stays inside the session. This is also
+	// where a configured context_window starts governing trimming.
+	sess := session.NewWithOptions(session.OptionsFromConfig(cfg), newResolver(cfg))
 	sess.SetUsage(session.NewPersistentUsage(cfg.DailyCap, path))
-	sess.SetTools(tools.For(policy, approver)...)
+	sess.SetTools(tools.For(policy, approver, tools.HideEnv(secretEnvNames(cfg)...))...)
 	return sess, nil
+}
+
+// secretEnvNames lists every environment variable the configuration says
+// holds a credential: each provider's api_key_env and header_env. They are
+// handed to the tools so that a command the model runs never inherits them;
+// the configuration is the one place that knows which names those are.
+func secretEnvNames(cfg config.Config) []string {
+	var names []string
+	for _, pc := range cfg.Providers {
+		if pc.APIKeyEnv != "" {
+			names = append(names, pc.APIKeyEnv)
+		}
+		for _, env := range pc.HeaderEnv {
+			names = append(names, env)
+		}
+	}
+	return names
 }

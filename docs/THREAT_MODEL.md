@@ -1,14 +1,19 @@
-KB_SNAPSHOT: UNPINNED
 # yonderllm threat model
 
 Intent: PRODUCTION
 
+Baseline: commit `ce03af3` (the `v0.2.0-rc.2` tree) plus the uncommitted
+hardening changes in the current working tree, listed under
+[fixed since rc.2](#fixed-in-the-working-tree-since-v020-rc2). This document
+describes the code at that point; it does not certify a published release.
+Re-pin the baseline when the working-tree changes are tagged.
+
 ## System overview
 
-Derived from [architecture](architecture.md) and [entities](entities/client.md).
-The system is an installable outbound-network CLI/TUI with optional local tools,
-plaintext conversation persistence, and a separate evaluation command. This is
-an unpinned working-tree model; it does not certify a published release.
+Derived from [architecture](threat-model/architecture.md) and
+[entities](threat-model/client.md). The system is an installable
+outbound-network CLI/TUI with optional local tools, plaintext conversation
+persistence, and a separate evaluation command.
 
 ## Trust boundaries
 
@@ -24,8 +29,9 @@ an unpinned working-tree model; it does not certify a published release.
    argument validation and approval precede execution. Tool output may contain
    prompt injection and must remain data, not system authority.
 5. **Tool to OS:** rooted file operations constrain built-in paths; approved
-   processes have the user's authority outside that root. Environment inheritance
-   exposes credentials to approved programs.
+   processes have the user's authority outside that root. Configured credential
+   variables and a short well-known list are stripped from the child
+   environment; every other inherited variable is exposed to approved programs.
 6. **History to disk/display:** plaintext saves and terminal-rendered content
    have different exposure risks. Redaction is not encryption or a complete
    secret detector. UI labels cannot make untrusted content trustworthy.
@@ -57,7 +63,39 @@ an unpinned working-tree model; it does not certify a published release.
 
 ## Current controls and findings
 
-### Fixed in this working tree
+### Fixed in the working tree since v0.2.0-rc.2
+
+- **High — `--yes` waived confirmation of interpreters and launchers:**
+  `Destructive()` was a name/verb table, so `sh -c`, `python -c`, `cmd /c`,
+  `xargs rm`, `find -exec`, `git branch -D` and similar ran unprompted under
+  auto-approve. Shells, script interpreters, launchers and force-style flags
+  are now always confirmed; `.exe`/`.cmd`/`.bat`/`.ps1`/`.com` suffixes are
+  stripped before matching. Evidence: `internal/shell` tests.
+- **High — auto-approved writes could plant execution hooks:** `write_file`
+  passed `destructive=false` for every path, so a model under `--yes` could
+  write `.githooks/pre-commit`, `Makefile` or `package.json` and trigger it
+  with a "harmless" command. Writes under dot-directories, to dotfiles and to
+  build/manifest/tool-configuration files are now confirmed even under `--yes`;
+  writes under `.git/` are refused in every mode.
+  Evidence: `workspace.Hook`, `internal/tools` tests.
+- **Medium — child processes inherited every API key:** `cmd.Env` was
+  `os.Environ()`. Configured `api_key_env`/`header_env` names and a well-known
+  credential list are now removed, case-insensitively. Evidence:
+  `internal/shell` scrub tests.
+- **Medium — credential-shaped files were plain `Allow` reads:** `.env`,
+  `id_rsa`, `.netrc`, `.git/config` and similar are refused in code mode and
+  confirmed in agent mode (including under `--yes`); reads under `.git/` and
+  the other search-skipped directories are refused. Evidence:
+  `workspace.Credential`, `internal/tools` tests.
+- **Medium — `run --json` mislabelled the answering model after a fallback:**
+  events now carry the `model` of the provider that produced them.
+- **Low — `Workspace.Search` ignored cancellation:** the tree walk now
+  returns `ctx.Err()`.
+- **Low — TUI approval double-answer race:** a second keystroke could rewrite
+  an allowed call as denied; answers are now recorded synchronously and a
+  pending question is resolved as denied when the exchange ends.
+
+### Fixed in v0.2.0-rc.2
 
 - **Medium — unbounded model catalogue:** a provider-controlled large JSON body
   could exhaust client memory. Catalogue reads now stop at 16 MiB + one sentinel
@@ -100,16 +138,18 @@ boundaries. This is evidence of specific controls, not proof of complete safety.
   direct child stopped by a deadline. Descendant termination is not guaranteed.
 - Full Linux `go test -race ./... -count=1` passed in WSL with Go 1.27 and GCC.
   Windows ordinary tests also pass. Live Surplus smoke results and pricing are
-  recorded in [evaluation notes](../../../EVALUATION.md).
+  recorded in [evaluation notes](EVALUATION.md).
 
 ## Residual risks and next verification
 
 - Prompt injection can influence model requests. Per-action approval reduces
   impact but a user can approve a harmful command; automatic approval expands
-  that exposure. Destructive-command name heuristics are not a sandbox.
-- Approved child programs inherit credentials and can access network/other
-  files. Portable process-tree termination and inherited-pipe handling require
-  a dedicated OS-level regression suite.
+  that exposure. Destructive-command and interpreter name heuristics are not a
+  sandbox: a command the tables do not recognise runs unprompted under `--yes`.
+- Approved child programs no longer see the configured credential variables,
+  but inherit every other variable and can access network/other files.
+  Portable process-tree termination and inherited-pipe handling require a
+  dedicated OS-level regression suite.
 - Files can change after the approval recheck. Replacement with a special file
   between precheck and open, and cancellation during traversal still need
   cross-platform adversarial fixtures.

@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/perm"
 )
 
 const (
@@ -47,6 +47,11 @@ const (
 type Runner struct {
 	dir    string
 	policy perm.Policy
+	// hidden names environment variables a child must not inherit, over and
+	// above wellKnownSecrets. Compared case-insensitively, because Windows
+	// resolves names that way and a filter that respected case there would
+	// let groq_api_key through while stripping GROQ_API_KEY.
+	hidden []string
 }
 
 // Result is what running a command produced.
@@ -68,18 +73,24 @@ type Result struct {
 // Open prepares dir for running commands under policy. The policy is not
 // consulted here, for the same reason workspace.Open does not consult it:
 // naming a directory is not one of the actions a mode governs.
-func Open(dir string, policy perm.Policy) *Runner {
-	return &Runner{dir: dir, policy: policy}
+//
+// hidden names environment variables that no child may inherit, typically
+// the api_key_env and header_env variables the configuration resolved. It is
+// optional: a caller with nothing to add still gets wellKnownSecrets removed,
+// and one that has not been taught the parameter compiles unchanged.
+func Open(dir string, policy perm.Policy, hidden ...string) *Runner {
+	return &Runner{dir: dir, policy: policy, hidden: hidden}
 }
 
 // Current uses the working directory, which is the project the user started
-// the program in and so the one they mean by an unqualified command.
-func Current(policy perm.Policy) (*Runner, error) {
+// the program in and so the one they mean by an unqualified command. hidden
+// is as for Open.
+func Current(policy perm.Policy, hidden ...string) (*Runner, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("shell: locate working directory: %w", err)
 	}
-	return Open(dir, policy), nil
+	return Open(dir, policy, hidden...), nil
 }
 
 // Dir reports where commands will run, for display.
@@ -125,11 +136,14 @@ func (r *Runner) Run(ctx context.Context, args []string) (Result, error) {
 	// so the interleaving is the command's own and no goroutine races for it.
 	cmd.Stdout = out
 	cmd.Stderr = out
-	// The environment is inherited: a build that cannot see PATH, HOME or a
-	// language's cache is not a useful build. That does mean a command can
-	// print a secret it was given, which is redaction's problem and not
-	// something this package can tell apart from ordinary output.
-	cmd.Env = os.Environ()
+	// The environment is inherited, less the credentials: a build that cannot
+	// see PATH, HOME or a language's cache is not a useful build, but a child
+	// has no business seeing the key this program talks to its provider
+	// with. Whatever a command prints goes back to the model and into the
+	// autosaved transcript, so `env` under auto-approval would otherwise be a
+	// one-step exfiltration. Secrets the configuration never named can still
+	// leak this way; that remains redaction's problem.
+	cmd.Env = scrub(os.Environ(), r.hidden)
 
 	runErr := cmd.Run()
 	if errors.Is(runErr, exec.ErrWaitDelay) {
@@ -207,25 +221,83 @@ var destroyers = map[string]bool{
 	"chown": true, "chmod": true, "sudo": true, "doas": true, "su": true,
 }
 
+// interpreters are programs whose argument is itself a program: shells,
+// language runtimes and launchers that hand the rest of the vector to
+// something this package never sees. The destroyers table can only judge what
+// is in the vector, and `sh -c "rm -rf ."` puts rm in a string rather than in
+// argv, so every one of these is confirmed whatever follows it. `python
+// --version` paying for that with one keystroke is the price of `python -c`
+// not being a way round the table.
+//
+// Names are matched after trailing version digits are removed, so python3.12,
+// perl5.36 and lua5.4 land on the same entries as their bare names.
+var interpreters = map[string]bool{
+	// Unix shells, and the BusyBox binary that contains one.
+	"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true,
+	"ksh": true, "mksh": true, "ash": true, "csh": true, "tcsh": true,
+	"busybox": true, "nu": true, "elvish": true, "xonsh": true,
+	// Windows shells and script hosts. verb has already dropped .exe, .cmd,
+	// .bat, .ps1 and .com, so command.com and cmd.exe arrive here bare.
+	"cmd": true, "command": true, "powershell": true, "pwsh": true, "wt": true,
+	"wscript": true, "cscript": true, "mshta": true, "rundll32": true,
+	"regsvr32": true, "msiexec": true, "wmic": true, "runas": true, "start": true,
+	// Language runtimes that take code on the command line or from a file.
+	"python": true, "py": true, "pypy": true, "node": true, "nodejs": true,
+	"deno": true, "bun": true, "perl": true, "ruby": true, "php": true,
+	"lua": true, "luajit": true, "tclsh": true, "osascript": true,
+	"awk": true, "gawk": true, "mawk": true, "nawk": true,
+	// Launchers that run whatever they are given, or fetch it first.
+	"xargs": true, "env": true, "nohup": true, "sudo": true, "doas": true,
+	"su": true, "timeout": true, "nice": true, "ionice": true, "time": true,
+	"watch": true, "setsid": true, "chroot": true, "strace": true, "ltrace": true,
+	"npx": true, "bunx": true, "uvx": true, "pipx": true,
+}
+
 // subcommands are programs that are harmless until told what to do, paired
 // with the verbs that make them irreversible. Publishing is here alongside
 // deletion: a released version cannot be recalled, and a force-push discards
-// history that was somebody else's.
+// history that was somebody else's. Verbs that run arbitrary code count too,
+// because `npm exec` is an interpreter that happens to be spelled as two
+// words.
 var subcommands = map[string]map[string]bool{
-	"git":       {"push": true, "reset": true, "clean": true, "rebase": true, "gc": true, "prune": true},
-	"npm":       {"publish": true, "unpublish": true},
-	"pnpm":      {"publish": true},
-	"yarn":      {"publish": true},
-	"cargo":     {"publish": true, "yank": true},
+	"git": {
+		"push": true, "reset": true, "clean": true, "rebase": true, "gc": true,
+		"prune": true, "restore": true, "rm": true, "mv": true, "config": true,
+		"filter-branch": true, "filter-repo": true, "update-ref": true,
+		"reflog": true, "worktree": true, "submodule": true,
+	},
+	"npm":       {"publish": true, "unpublish": true, "exec": true},
+	"pnpm":      {"publish": true, "exec": true, "dlx": true},
+	"yarn":      {"publish": true, "exec": true, "dlx": true},
+	"bun":       {"x": true},
+	"cargo":     {"publish": true, "yank": true, "clean": true},
 	"docker":    {"rm": true, "rmi": true, "prune": true, "kill": true, "system": true},
 	"kubectl":   {"delete": true, "drain": true, "apply": true, "replace": true},
 	"terraform": {"apply": true, "destroy": true},
 	"gh":        {"release": true, "repo": true},
 	"go":        {"clean": true},
+	"make":      {"clean": true, "distclean": true, "mrproper": true, "install": true, "uninstall": true},
 	"pip":       {"uninstall": true},
 	"brew":      {"uninstall": true, "remove": true},
 	"apt":       {"remove": true, "purge": true},
 	"systemctl": {"stop": true, "disable": true, "mask": true},
+	"reg":       {"add": true, "delete": true, "import": true, "restore": true},
+	"schtasks":  {"/create": true, "/delete": true, "/run": true, "/change": true},
+	"sc":        {"create": true, "delete": true, "config": true, "stop": true},
+}
+
+// gitVerbArgs are the arguments that make an otherwise safe git verb discard
+// work: `git branch -D`, `git stash drop`, `git checkout -- .`. They are keyed
+// by verb because the same spelling is harmless elsewhere — `git add .` and
+// `git log -- file` should not cost a question — and looked for anywhere after
+// the verb, because git accepts options in either order.
+var gitVerbArgs = map[string]map[string]bool{
+	"branch":   {"-D": true, "-d": true, "-M": true, "-m": true},
+	"stash":    {"drop": true, "clear": true},
+	"checkout": {"--": true, ".": true, "-B": true},
+	"switch":   {"--discard-changes": true, "-C": true},
+	"tag":      {"-d": true},
+	"remote":   {"remove": true, "rm": true, "prune": true},
 }
 
 // Destructive reports whether a vector should be confirmed even where a mode
@@ -233,15 +305,20 @@ var subcommands = map[string]map[string]bool{
 //
 // The answer errs towards yes. Over-reporting costs one question that the user
 // answers in a keystroke; under-reporting costs whatever the command deleted.
-// So a program in either table counts, and so does a force flag on anything at
+// So a program in any table counts, and so does a force flag on anything at
 // all, because --force is precisely how an otherwise cautious command is told
 // to stop refusing.
+//
+// This is a table of names, not an understanding of what a command does. A
+// program the tables have never heard of is not destructive as far as this
+// function can tell, and a caller relying on it under auto-approval is relying
+// on exactly that: recognised commands are confirmed, unrecognised ones run.
 func Destructive(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	name := verb(args[0])
-	if destroyers[name] {
+	if destroyers[name] || interpreters[unversioned(name)] {
 		return true
 	}
 	if verbs := subcommands[name]; verbs != nil {
@@ -251,14 +328,100 @@ func Destructive(args []string) bool {
 			}
 		}
 	}
+	switch name {
+	case "git":
+		if gitDestructive(args[1:]) {
+			return true
+		}
+	case "find":
+		if findExecutes(args[1:]) {
+			return true
+		}
+	}
 	return forced(args[1:])
 }
 
+// gitDestructive catches the git invocations that hide behind a safe verb.
+//
+// `-c key=value` sets any configuration key for one command, including
+// core.hooksPath and core.sshCommand, which turns `git -c ... status` into a
+// way to run a program of the caller's choosing; --config-env is the same door
+// with the value read from the environment. The verb is the first argument not
+// spelled as an option, and its arguments are checked against the ones that
+// throw work away: a branch deleted, a stash dropped, a checkout of `--` or
+// `.` that overwrites the working tree.
+func gitDestructive(args []string) bool {
+	var verbArgs map[string]bool
+	skip := false
+	for _, arg := range args {
+		if skip {
+			skip = false
+			continue
+		}
+		if arg == "-c" || strings.HasPrefix(arg, "--config-env") {
+			return true
+		}
+		if verbArgs == nil {
+			// Global options that take their value as the next argument,
+			// which must not be mistaken for the verb.
+			if arg == "-C" || arg == "--git-dir" || arg == "--work-tree" {
+				skip = true
+				continue
+			}
+			if !strings.HasPrefix(arg, "-") {
+				verbArgs = gitVerbArgs[arg]
+				if verbArgs == nil {
+					// A verb with nothing to catch: subcommands and
+					// forced have already had their say.
+					return false
+				}
+			}
+			continue
+		}
+		if verbArgs[arg] {
+			return true
+		}
+	}
+	return false
+}
+
+// findExecutes reports a find that runs a program for each result, which
+// makes it an interpreter with a search bolted on. -delete is caught by
+// forced already.
+func findExecutes(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "-exec", "-execdir", "-ok", "-okdir":
+			return true
+		}
+	}
+	return false
+}
+
 // verb reduces a program to the name a table can match, so that ./scripts/rm
-// and /usr/bin/rm are not read as something new.
+// and /usr/bin/rm are not read as something new. Windows lets a program be
+// named with or without its extension, and a batch or PowerShell wrapper named
+// rm.cmd is still rm to whoever wrote it, so every launchable extension is
+// removed and not only .exe.
 func verb(arg string) string {
-	name := filepath.Base(filepath.ToSlash(strings.TrimSpace(arg)))
-	return strings.TrimSuffix(strings.ToLower(name), ".exe")
+	// Models may spell a Windows path even when this binary runs on Unix.
+	// filepath.ToSlash is a no-op for '\' on non-Windows hosts, so the
+	// separator is normalized by hand before Base extracts the name.
+	name := strings.ToLower(filepath.Base(strings.ReplaceAll(strings.TrimSpace(arg), `\`, "/")))
+	for _, ext := range []string{".exe", ".cmd", ".bat", ".ps1", ".com"} {
+		if strings.HasSuffix(name, ext) {
+			return strings.TrimSuffix(name, ext)
+		}
+	}
+	return name
+}
+
+// unversioned drops the trailing version an interpreter is often installed
+// under: python3.12, perl5.36, lua5.4. It is applied only to the interpreters
+// lookup, where the names in question live; 7z and bzip2 are not affected
+// because neither is in that table.
+func unversioned(name string) string {
+	return strings.TrimRight(name, "0123456789.")
 }
 
 // forced reports a flag that overrides a program's own caution.
@@ -283,9 +446,17 @@ func forced(args []string) bool {
 // A rooted name is refused first, because C:tool.exe carries no separator and
 // would otherwise pass for a bare name. What remains without a separator is
 // looked up on PATH, which is how a person would type it. A name with a
-// separator in it is a file in the project, and is held to the workspace's
-// rule: a command may not be fetched from outside the tree the user opened,
-// whether it says so plainly or arrives as a climb through it.
+// separator in it is resolved against the project, and a name that spells out
+// a climb above it is refused.
+//
+// This is a check on how the name is spelled, not containment of what runs.
+// A bare name executes whatever PATH resolves it to, anywhere on the machine;
+// a relative path may be a symlink whose target is outside the project; and
+// the program, once running, is an ordinary process with the user's whole
+// account at its disposal. What the check buys is that a vector cannot name a
+// place outside the tree in so many words and have that be the reason it was
+// approved. The workspace's os.Root gives file access a real boundary; nothing
+// here gives execution one, and docs/SAFETY.md says so.
 func program(args []string) (string, error) {
 	if len(args) == 0 {
 		return "", errors.New("shell: no command named")
@@ -335,6 +506,48 @@ func rooted(name string) bool {
 		return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 	}
 	return false
+}
+
+// wellKnownSecrets are variables that hold a credential wherever they appear,
+// stripped from every child regardless of what the configuration named. The
+// list is short on purpose: it covers the providers this program ships
+// defaults for and the tokens a developer's shell most often carries, and the
+// configured names cover the rest. It is not an attempt to enumerate every
+// secret a machine might hold, which is a job no list can do.
+var wellKnownSecrets = []string{
+	"GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY",
+	"SURPLUS_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MISTRAL_API_KEY",
+	"COHERE_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY", "TOGETHER_API_KEY",
+	"AZURE_OPENAI_API_KEY", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN",
+	"GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
+}
+
+// scrub returns environ without the named variables. Names are compared
+// without regard to case, as Windows does; a filter that let `Groq_Api_Key`
+// through because the configuration spelled it in capitals would have failed
+// at exactly the thing it exists for. An entry with no '=' is kept as it is,
+// since it is not a variable this filter could be asked about.
+func scrub(environ []string, hidden []string) []string {
+	drop := make(map[string]bool, len(hidden)+len(wellKnownSecrets))
+	for _, name := range wellKnownSecrets {
+		drop[strings.ToUpper(name)] = true
+	}
+	for _, name := range hidden {
+		if name = strings.TrimSpace(name); name != "" {
+			drop[strings.ToUpper(name)] = true
+		}
+	}
+
+	kept := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		name, _, found := strings.Cut(entry, "=")
+		if found && drop[strings.ToUpper(name)] {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return kept
 }
 
 // capped collects output up to maxOutputBytes and counts what it discarded.

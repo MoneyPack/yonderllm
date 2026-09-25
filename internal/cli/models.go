@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"yonderllm/internal/provider"
-	"yonderllm/internal/terminaltext"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/terminaltext"
 )
 
 // newModelsCmd builds the model catalogue command.
