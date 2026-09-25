@@ -12,7 +12,7 @@ package cli
 import (
 	"testing"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 func TestCapLabel(t *testing.T) {

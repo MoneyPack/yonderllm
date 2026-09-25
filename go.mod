@@ -1,4 +1,4 @@
-module yonderllm
+module github.com/MoneyPack/yonderllm
 
 go 1.27.0
 

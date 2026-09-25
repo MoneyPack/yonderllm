@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
 )
 
 const SuiteVersion = "2"

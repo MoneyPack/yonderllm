@@ -1,0 +1,43 @@
+# golangci-lint configuration (v2 schema). CI runs this through
+# golangci/golangci-lint-action; the same file drives a local
+# `golangci-lint run ./...`, so the two never disagree about what counts.
+#
+# The set is the default "standard" group plus misspell. Everything listed is
+# named explicitly, even the ones the standard group already contains, so that
+# a change to the upstream default cannot silently drop a check we rely on.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - errcheck     # an ignored error return is a silent failure waiting to happen
+    - govet        # the same analyzers `go vet` runs, kept in one report
+    - ineffassign  # an assignment nothing reads is usually a lost result
+    - misspell     # comments and messages are user-facing; typos are bugs there
+    - staticcheck  # bug patterns, deprecated APIs, and simplifications
+    - unused       # dead code is where the next stale comment lives
+  settings:
+    misspell:
+      # No locale: the codebase uses British spelling in prose, and forcing
+      # either locale would flag correct words. Only genuine misspellings.
+      ignore-rules: []
+  exclusions:
+    # std-error-handling is errcheck's long-standing default exclusion: the
+    # error from `defer f.Close()` on a file opened for reading, from writing
+    # to stderr, or from os.Remove in a cleanup is one nothing can act on, and
+    # a `_ =` in front of each would be noise rather than handling. Every
+    # other ignored error still has to be ignored explicitly.
+    presets:
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  # The defaults hide repeats of the same finding after three and cap each
+  # linter at fifty, which makes a run look nearly clean when it is not.
+  # Report everything: a CI log that names every offender is fixed in one
+  # pass rather than in rounds.
+  max-issues-per-linter: 0
+  max-same-issues: 0

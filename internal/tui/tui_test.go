@@ -18,12 +18,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yonderllm/internal/config"
-	"yonderllm/internal/perm"
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
-	"yonderllm/internal/tools"
-	"yonderllm/internal/workspace"
+	"github.com/MoneyPack/yonderllm/internal/config"
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/tools"
+	"github.com/MoneyPack/yonderllm/internal/workspace"
 )
 
 // stubProvider is a provider that replays a fixed list of deltas. It records
@@ -160,6 +160,32 @@ func transcript(m model) string {
 func typing(m model, text string) model {
 	m.input.SetValue(text)
 	return m
+}
+
+// command types a slash command and submits it. The commands that do their
+// work off the loop hand back a tea.Cmd whose result Bubble Tea would feed
+// straight back in; this runs that step by hand so a test sees the finished
+// transcript, and reports whether the command went off the loop at all.
+func command(t *testing.T, m model, text string) (model, bool) {
+	t.Helper()
+
+	m = typing(m, text)
+	m, cmd := step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		return m, false
+	}
+	done, ok := cmd().(commandDoneMsg)
+	if !ok {
+		t.Fatalf("%s produced %T, want tui.commandDoneMsg", text, done)
+	}
+	if m.command == "" {
+		t.Fatalf("%s went off the loop without saying so", text)
+	}
+	m, _ = step(t, m, done)
+	if m.command != "" {
+		t.Fatalf("%s is still reported as running after its result arrived", text)
+	}
+	return m, true
 }
 
 func TestNewModelGreets(t *testing.T) {
@@ -508,8 +534,10 @@ func TestReadCommandShowsAFile(t *testing.T) {
 	workspaceDir(t, map[string]string{"notes.txt": "alpha\nbeta\n"})
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/read notes.txt")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, async := command(t, m, "/read notes.txt")
+	if !async {
+		t.Fatal("/read did its reading on the message loop")
+	}
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockInfo {
@@ -529,8 +557,7 @@ func TestReadCommandReadsThroughASubdirectory(t *testing.T) {
 	workspaceDir(t, map[string]string{"docs/guide.md": "# heading\n"})
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/read docs/guide.md")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/read docs/guide.md")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockInfo {
@@ -547,8 +574,7 @@ func TestReadCommandKeepsSpacesInTheName(t *testing.T) {
 	workspaceDir(t, map[string]string{"two words.txt": "spaced\n"})
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/read two words.txt")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/read two words.txt")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockInfo {
@@ -561,8 +587,11 @@ func TestReadCommandKeepsSpacesInTheName(t *testing.T) {
 
 func TestReadCommandWithoutAnArgumentShowsUsage(t *testing.T) {
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/read")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	// Usage errors need no disk, so they are reported at once.
+	m, async := command(t, m, "/read")
+	if async {
+		t.Error("/read with no argument went off the loop")
+	}
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockError {
@@ -579,8 +608,7 @@ func TestReadCommandIsDeniedInChatMode(t *testing.T) {
 	workspaceDir(t, map[string]string{"notes.txt": "alpha\n"})
 
 	m := newTestModel(t, &stubProvider{name: "stub"})
-	m = typing(m, "/read notes.txt")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/read notes.txt")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockError {
@@ -598,8 +626,7 @@ func TestReadCommandReportsAMissingFile(t *testing.T) {
 	workspaceDir(t, nil)
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/read absent.txt")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/read absent.txt")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockError {
@@ -617,8 +644,7 @@ func TestReadCommandRejectsAPathOutsideTheWorkspace(t *testing.T) {
 	workspaceDir(t, map[string]string{"notes.txt": "alpha\n"})
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/read ../escape.txt")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/read ../escape.txt")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockError {
@@ -672,8 +698,10 @@ func TestSearchCommandFindsMatches(t *testing.T) {
 	})
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/search needle")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, async := command(t, m, "/search needle")
+	if !async {
+		t.Fatal("/search walked the tree on the message loop")
+	}
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockInfo {
@@ -695,8 +723,7 @@ func TestSearchCommandIgnoresCase(t *testing.T) {
 	workspaceDir(t, map[string]string{"notes.txt": "Needle here\n"})
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/search NEEDLE")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/search NEEDLE")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockInfo {
@@ -713,8 +740,7 @@ func TestSearchCommandKeepsSpacesInTheQuery(t *testing.T) {
 	workspaceDir(t, map[string]string{"notes.txt": "two words here\n"})
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/search two words")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/search two words")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockInfo {
@@ -727,8 +753,7 @@ func TestSearchCommandKeepsSpacesInTheQuery(t *testing.T) {
 
 func TestSearchCommandWithoutAnArgumentShowsUsage(t *testing.T) {
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/search")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/search")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockError {
@@ -743,8 +768,7 @@ func TestSearchCommandIsDeniedInChatMode(t *testing.T) {
 	workspaceDir(t, map[string]string{"notes.txt": "needle\n"})
 
 	m := newTestModel(t, &stubProvider{name: "stub"})
-	m = typing(m, "/search needle")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/search needle")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockError {
@@ -760,8 +784,7 @@ func TestSearchCommandReportsNoMatchesAsANotice(t *testing.T) {
 	workspaceDir(t, map[string]string{"notes.txt": "alpha\n"})
 
 	m := newTestModelMode(t, &stubProvider{name: "stub"}, perm.Code)
-	m = typing(m, "/search needle")
-	m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = command(t, m, "/search needle")
 
 	last := m.blocks[len(m.blocks)-1]
 	if last.kind != blockNotice {

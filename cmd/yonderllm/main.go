@@ -9,7 +9,7 @@ package main
 import (
 	"os"
 
-	"yonderllm/internal/cli"
+	"github.com/MoneyPack/yonderllm/internal/cli"
 )
 
 func main() {

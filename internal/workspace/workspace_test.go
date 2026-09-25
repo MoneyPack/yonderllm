@@ -2,13 +2,14 @@ package workspace
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/perm"
 )
 
 // open builds a workspace over a fresh temporary tree. The tree is per-test so
@@ -104,7 +105,7 @@ func TestSearchIsRefusedInChatMode(t *testing.T) {
 	w, dir := open(t, perm.Chat)
 	write(t, dir, "todo.md", "remember the milk\n")
 
-	matches, err := w.Search("milk")
+	matches, err := w.Search(context.Background(), "milk")
 	wantDenied(t, err, perm.Chat, perm.Search)
 	if matches != nil {
 		t.Errorf("a refused search returned %d matches, want none", len(matches))
@@ -124,7 +125,7 @@ func TestAutoApproveDoesNotChangeReadingOrSearching(t *testing.T) {
 	if _, err := w.ReadFile("todo.md"); err == nil {
 		t.Error("auto-approve granted a read that chat mode forbids")
 	}
-	if _, err := w.Search("milk"); err == nil {
+	if _, err := w.Search(context.Background(), "milk"); err == nil {
 		t.Error("auto-approve granted a search that chat mode forbids")
 	}
 }
@@ -133,7 +134,7 @@ func TestSearchMatchesLiteralsIgnoringCase(t *testing.T) {
 	w, dir := open(t, perm.Code)
 	write(t, dir, "sub/notes.md", "first line\nMILK and honey\nlast line\n")
 
-	matches, err := w.Search("  Milk  ")
+	matches, err := w.Search(context.Background(), "  Milk  ")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -156,7 +157,7 @@ func TestSearchTreatsPunctuationAsTextNotSyntax(t *testing.T) {
 	w, dir := open(t, perm.Code)
 	write(t, dir, "perm.go", "func (p Policy) Check(a Action) Decision {\n")
 
-	matches, err := w.Search("func (p Policy)")
+	matches, err := w.Search(context.Background(), "func (p Policy)")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestSearchStripsCarriageReturns(t *testing.T) {
 	w, dir := open(t, perm.Code)
 	write(t, dir, "dos.txt", "milk\r\n")
 
-	matches, err := w.Search("milk")
+	matches, err := w.Search(context.Background(), "milk")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -186,7 +187,7 @@ func TestSearchNeedsSomethingToLookFor(t *testing.T) {
 	w, _ := open(t, perm.Code)
 
 	for _, query := range []string{"", "   ", "\t\n"} {
-		matches, err := w.Search(query)
+		matches, err := w.Search(context.Background(), query)
 		if err == nil {
 			t.Fatalf("Search(%q) was accepted, want a refusal", query)
 		}
@@ -206,7 +207,7 @@ func TestSearchSkipsMachineryAndVendoredTrees(t *testing.T) {
 		write(t, dir, name+"/theirs.txt", "milk\n")
 	}
 
-	matches, err := w.Search("milk")
+	matches, err := w.Search(context.Background(), "milk")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -234,7 +235,7 @@ func TestSearchSearchesADirectoryNamedLikeASkippedOneAtTheRoot(t *testing.T) {
 	}
 	defer w.Close()
 
-	matches, err := w.Search("milk")
+	matches, err := w.Search(context.Background(), "milk")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -248,7 +249,7 @@ func TestSearchStopsAtTheMatchLimit(t *testing.T) {
 	write(t, dir, "a.txt", strings.Repeat("milk\n", maxMatches+50))
 	write(t, dir, "b.txt", strings.Repeat("milk\n", 10))
 
-	matches, err := w.Search("milk")
+	matches, err := w.Search(context.Background(), "milk")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -261,7 +262,7 @@ func TestSearchTruncatesAnOverlongLine(t *testing.T) {
 	w, dir := open(t, perm.Code)
 	write(t, dir, "minified.js", "milk"+strings.Repeat("x", maxLineBytes+100)+"\n")
 
-	matches, err := w.Search("milk")
+	matches, err := w.Search(context.Background(), "milk")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -283,7 +284,7 @@ func TestSearchIgnoresFilesItCannotUsefullyRead(t *testing.T) {
 	write(t, dir, "image.png", "milk\x00\n")
 	write(t, dir, "dump.sql", "milk\n"+strings.Repeat("x", maxFileBytes))
 
-	matches, err := w.Search("milk")
+	matches, err := w.Search(context.Background(), "milk")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -815,7 +816,7 @@ func TestSearchSkipsAFileLargerThanTheLimit(t *testing.T) {
 	write(t, dir, "big.txt", strings.Repeat("needle\n", maxFileBytes/7+1))
 	write(t, dir, "small.txt", "needle here\n")
 
-	matches, err := w.Search("needle")
+	matches, err := w.Search(context.Background(), "needle")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -831,7 +832,7 @@ func TestSearchReportsNestedPathsWithForwardSlashes(t *testing.T) {
 	w, dir := open(t, perm.Code)
 	write(t, dir, "one/two/three.txt", "needle\n")
 
-	matches, err := w.Search("needle")
+	matches, err := w.Search(context.Background(), "needle")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -847,7 +848,7 @@ func TestSearchStopsAtTheMatchLimitInsideOneFile(t *testing.T) {
 	w, dir := open(t, perm.Code)
 	write(t, dir, "many.txt", strings.Repeat("needle\n", maxMatches+50))
 
-	matches, err := w.Search("needle")
+	matches, err := w.Search(context.Background(), "needle")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -864,7 +865,7 @@ func TestSearchTruncatesAnOverlongLineByBytes(t *testing.T) {
 	line := "needle." + strings.Repeat("é", maxLineBytes)
 	write(t, dir, "wide.txt", line+"\n")
 
-	matches, err := w.Search("needle")
+	matches, err := w.Search(context.Background(), "needle")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}

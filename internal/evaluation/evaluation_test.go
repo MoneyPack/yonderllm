@@ -6,16 +6,25 @@ import (
 	"testing"
 	"time"
 
-	"yonderllm/internal/config"
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
 )
+
+// fixtureOptions is the session every offline case runs under: one always
+// credentialed provider, no fallbacks, no cap. No config file is involved.
+func fixtureOptions() session.Options {
+	return session.Options{
+		Provider:  "fixture",
+		MaxTokens: 256,
+		Providers: map[string]session.ProviderOptions{"fixture": {Model: "fixture-v1", Credentialed: true}},
+	}
+}
 
 func TestFixtureSuite(t *testing.T) {
 	for _, c := range Cases() {
 		t.Run(c.ID, func(t *testing.T) {
-			cfg := config.Config{Provider: "fixture", MaxTokens: 256, Providers: map[string]config.ProviderConfig{"fixture": {Model: "fixture-v1"}}}
-			s := session.New(cfg, func(string) (provider.Provider, error) { return Fixture(c.ID), nil })
+			opts := fixtureOptions()
+			s := session.NewWithOptions(opts, func(string) (provider.Provider, error) { return Fixture(c.ID), nil })
 			report := Run(context.Background(), s, c, time.Now)
 			if !report.Passed {
 				t.Fatalf("fixture failed: %+v", report)
@@ -59,8 +68,8 @@ func TestFinalAnswerAndIgnoredToolCallsAreReportedHonestly(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			p := &scriptedProvider{chunks: test.chunks}
-			cfg := config.Config{Provider: "fixture", MaxTokens: 256, Providers: map[string]config.ProviderConfig{"fixture": {Model: "fixture-v1"}}}
-			s := session.New(cfg, func(string) (provider.Provider, error) { return p, nil })
+			opts := fixtureOptions()
+			s := session.NewWithOptions(opts, func(string) (provider.Provider, error) { return p, nil })
 			r := Run(context.Background(), s, c, time.Now)
 			if r.Passed || r.Answer != test.answer || len(r.ToolCalls) != test.calls {
 				t.Fatalf("misleading report: %+v", r)
@@ -86,8 +95,8 @@ func TestJudgeRejectsWrongAnswersAndExtraTools(t *testing.T) {
 
 func TestLatencyClockAndCancellation(t *testing.T) {
 	c := Cases()[0]
-	cfg := config.Config{Provider: "fixture", MaxTokens: 256, Providers: map[string]config.ProviderConfig{"fixture": {Model: "fixture-v1"}}}
-	s := session.New(cfg, func(string) (provider.Provider, error) { return Fixture(c.ID), nil })
+	opts := fixtureOptions()
+	s := session.NewWithOptions(opts, func(string) (provider.Provider, error) { return Fixture(c.ID), nil })
 	n := 0
 	now := func() time.Time { v := time.Unix(0, int64(n)*int64(10*time.Millisecond)); n++; return v }
 	r := Run(context.Background(), s, c, now)
@@ -103,8 +112,8 @@ func TestLatencyClockAndCancellation(t *testing.T) {
 }
 
 func TestProbeCancellationRecordsUnwindAndMissingSample(t *testing.T) {
-	cfg := config.Config{Provider: "fixture", MaxTokens: 256, Providers: map[string]config.ProviderConfig{"fixture": {Model: "fixture-v1"}}}
-	s := session.New(cfg, func(string) (provider.Provider, error) { return Fixture("arithmetic"), nil })
+	opts := fixtureOptions()
+	s := session.NewWithOptions(opts, func(string) (provider.Provider, error) { return Fixture("arithmetic"), nil })
 	n := 0
 	now := func() time.Time { n++; return time.Unix(0, int64(n)*int64(time.Millisecond)) }
 	r := ProbeCancellation(context.Background(), s, now)

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"yonderllm/internal/config"
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/config"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 // fakeProvider is a scripted adapter. It records what it was asked so tests can
@@ -1208,7 +1208,9 @@ func TestSaveLoadConversationRoundTrip(t *testing.T) {
 
 	// Restore into a second, empty session.
 	s2 := New(testConfig("groq"), func(string) (provider.Provider, error) { return nil, nil })
-	s2.LoadConversation(got)
+	if err := s2.LoadConversation(got); err != nil {
+		t.Fatalf("LoadConversation: %v", err)
+	}
 	if got := s2.History().System(); got != "be terse" {
 		t.Errorf("system = %q", got)
 	}

@@ -4,7 +4,6 @@
 package session
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -16,15 +15,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofrs/flock"
-
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/redact"
 )
 
 // sessionsVersion is the on-disk schema version. Bumping it lets a future
 // reader refuse (or migrate) files this version could not understand instead
 // of silently misreading a conversation.
 const sessionsVersion = 1
+
+// maxSessionBytes bounds one saved conversation on disk, in both directions.
+// A transcript that large is almost certainly a tool result gone wrong, and
+// reading one back without a limit would let a corrupt file exhaust memory.
+const maxSessionBytes = 16 << 20
 
 // Each new/resumed interactive run gets its own autosave. Named snapshots
 // remain untouched unless explicitly saved to that name again.
@@ -150,7 +153,6 @@ func (s *Sessions) Save(name string, conv SavedConversation) error {
 	if err := validSessionName(name); err != nil {
 		return err
 	}
-	safe := name
 	unlock, err := s.lock()
 	if err != nil {
 		return err
@@ -163,17 +165,17 @@ func (s *Sessions) Save(name string, conv SavedConversation) error {
 	out := apiConversation{
 		Version:  sessionsVersion,
 		Updated:  time.Now().UTC(),
-		Name:     safe,
+		Name:     name,
 		Provider: conv.Provider,
 		Model:    conv.Model,
-		System:   redactable(conv.System),
+		System:   redact.Text(conv.System),
 		Messages: toAPI(redactSavedMessages(conv.Messages)),
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode session: %w", err)
 	}
-	if len(data) > 16<<20 {
+	if len(data) > maxSessionBytes {
 		return errors.New("session exceeds 16 MiB")
 	}
 
@@ -197,7 +199,7 @@ func (s *Sessions) Save(name string, conv SavedConversation) error {
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return fmt.Errorf("protect session: %w", err)
 	}
-	if err := os.Rename(tmpName, s.pathFor(safe)); err != nil {
+	if err := os.Rename(tmpName, s.pathFor(name)); err != nil {
 		return fmt.Errorf("install session: %w", err)
 	}
 	return nil
@@ -276,11 +278,11 @@ func (s *Sessions) loadFile(path string) (SavedConversation, error) {
 		return SavedConversation{}, fmt.Errorf("read session: %w", err)
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 16<<20+1))
+	data, err := io.ReadAll(io.LimitReader(f, maxSessionBytes+1))
 	if err != nil {
 		return SavedConversation{}, err
 	}
-	if len(data) > 16<<20 {
+	if len(data) > maxSessionBytes {
 		return SavedConversation{}, errors.New("session exceeds 16 MiB")
 	}
 	var out apiConversation
@@ -317,16 +319,14 @@ func validSessionName(name string) error {
 	return nil
 }
 
+// lock serialises writers to the store. Readers do not take it: a snapshot is
+// installed by rename, so a reader sees either the old file or the new one.
 func (s *Sessions) lock() (func(), error) {
-	l := flock.New(filepath.Join(s.dir, ".store.lock"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	ok, err := l.TryLockContext(ctx, 10*time.Millisecond)
-	if err != nil || !ok {
-		l.Close()
-		return nil, fmt.Errorf("lock sessions: %v", err)
+	unlock, err := lockFile(filepath.Join(s.dir, ".store.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("lock sessions: %w", err)
 	}
-	return func() { _ = l.Close() }, nil
+	return unlock, nil
 }
 
 func (s *Sessions) Latest() (SavedConversation, error) {
@@ -385,7 +385,10 @@ func redactSavedMessages(msgs []provider.Message) []provider.Message {
 				data, _ := json.Marshal(value)
 				c.Arguments = string(data)
 			} else {
-				c.Arguments = placeholder
+				// Arguments that are not JSON cannot be inspected key by
+				// key, and a blob the model produced is not worth keeping
+				// at the risk of a credential inside it reaching disk.
+				c.Arguments = redact.Placeholder
 			}
 		}
 	}
@@ -396,8 +399,8 @@ func redactJSON(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
 		for k, val := range x {
-			if namesSecret(k) {
-				x[k] = placeholder
+			if redact.NamesSecret(k) {
+				x[k] = redact.Placeholder
 			} else {
 				x[k] = redactJSON(val)
 			}
@@ -409,7 +412,7 @@ func redactJSON(v any) any {
 		}
 		return x
 	case string:
-		return redactable(x)
+		return redact.Text(x)
 	default:
 		return v
 	}

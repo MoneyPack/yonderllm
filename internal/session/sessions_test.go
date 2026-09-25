@@ -6,8 +6,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 func TestSessionsRoundTrip(t *testing.T) {
@@ -226,6 +227,100 @@ func TestSessionsRejectsUnknownVersion(t *testing.T) {
 	}
 	if _, err := s.Get("v1"); err == nil {
 		t.Error("future-version conversation was read instead of refused")
+	}
+}
+
+// TestLatestResolvesToTheNewestSnapshot is what `--last` rests on: with
+// nothing saved it fails rather than inventing a conversation, and with
+// several saved it picks the most recently written one by save time, not by
+// name or directory order.
+func TestLatestResolvesToTheNewestSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenSessions(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Latest(); err == nil || !strings.Contains(err.Error(), "no saved conversations") {
+		t.Fatalf("Latest on an empty store = %v, want a no-conversations error", err)
+	}
+
+	// Names sort the other way round from save order, so a Latest that
+	// looked at names would answer "zulu".
+	for _, name := range []string{"zulu", "alpha"} {
+		if err := s.Save(name, SavedConversation{Messages: []provider.Message{{Role: provider.RoleUser, Content: name}}}); err != nil {
+			t.Fatal(err)
+		}
+		// Save stamps time.Now; make sure the two stamps differ even on a
+		// coarse clock.
+		time.Sleep(5 * time.Millisecond)
+	}
+	got, err := s.Latest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "alpha" || len(got.Messages) != 1 || got.Messages[0].Content != "alpha" {
+		t.Fatalf("Latest = %+v, want the alpha conversation", got)
+	}
+
+	// A corrupt file in the directory is skipped, not reported.
+	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Latest(); err != nil || got.Name != "alpha" {
+		t.Fatalf("Latest with a corrupt neighbour = %+v, %v", got, err)
+	}
+
+	// An unreadable directory is an error, since there is nothing to choose.
+	if _, err := (&Sessions{dir: filepath.Join(dir, "missing")}).Latest(); err == nil {
+		t.Fatal("Latest on a missing directory succeeded")
+	}
+}
+
+// TestEnableSavingGeneratesDistinctValidAutosaveNames covers randomSessionID:
+// an autosave with no explicit name gets a session-<hex> name that passes the
+// same validation as a user-supplied one, and two sessions never share it.
+func TestEnableSavingGeneratesDistinctValidAutosaveNames(t *testing.T) {
+	store, err := OpenSessions(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for range 3 {
+		s := New(testConfig("groq"), resolverFor(&fakeProvider{name: "groq"}))
+		if err := s.EnableSaving(store, ""); err != nil {
+			t.Fatal(err)
+		}
+		if s.store != store {
+			t.Fatal("EnableSaving did not attach the store")
+		}
+		if !strings.HasPrefix(s.saveName, "session-") || len(s.saveName) != len("session-")+32 {
+			t.Fatalf("autosave name = %q, want session- followed by 32 hex digits", s.saveName)
+		}
+		if err := validSessionName(s.saveName); err != nil {
+			t.Fatalf("autosave name %q fails validation: %v", s.saveName, err)
+		}
+		if names[s.saveName] {
+			t.Fatalf("autosave name %q repeated", s.saveName)
+		}
+		names[s.saveName] = true
+	}
+
+	id := randomSessionID()
+	if len(id) != 16 {
+		t.Fatalf("randomSessionID returned %d bytes, want 16", len(id))
+	}
+	if string(id) == string(randomSessionID()) {
+		t.Fatal("randomSessionID repeated itself")
+	}
+
+	// An explicit name is validated rather than sanitised: the caller asked
+	// for something specific and should hear that it cannot have it.
+	s := New(testConfig("groq"), resolverFor(&fakeProvider{name: "groq"}))
+	if err := s.EnableSaving(store, "Not Valid"); err == nil {
+		t.Fatal("invalid explicit autosave name accepted")
+	}
+	if s.store != nil {
+		t.Fatal("a rejected name still attached the store")
 	}
 }
 

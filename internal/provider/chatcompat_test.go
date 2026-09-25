@@ -31,7 +31,7 @@ func sseServer(t *testing.T, frames []string) (*httptest.Server, *chatRequest) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		for _, f := range frames {
-			io.WriteString(w, f)
+			_, _ = io.WriteString(w, f)
 			w.(http.Flusher).Flush()
 		}
 	}))
@@ -149,7 +149,7 @@ func TestStreamSendsAuthAndExtraHeaders(t *testing.T) {
 		auth = r.Header.Get("Authorization")
 		title = r.Header.Get("X-Title")
 		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "data: [DONE]\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
 
@@ -192,7 +192,7 @@ func TestStreamQuotaErrorCarriesRetryAfter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(http.StatusTooManyRequests)
-		io.WriteString(w, `{"error":{"message":"rate limit reached","type":"rate_limit"}}`)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limit reached","type":"rate_limit"}}`)
 	}))
 	defer srv.Close()
 
@@ -216,7 +216,7 @@ func TestStreamQuotaErrorCarriesRetryAfter(t *testing.T) {
 func TestStreamPaymentRequiredIsQuota(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusPaymentRequired)
-		io.WriteString(w, `{"error":{"message":"credits exhausted"}}`)
+		_, _ = io.WriteString(w, `{"error":{"message":"credits exhausted"}}`)
 	}))
 	defer srv.Close()
 
@@ -232,7 +232,7 @@ func TestStreamAuthErrorRedactsEchoedKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		// Providers really do echo the offending credential back.
-		io.WriteString(w, `{"error":{"message":"Invalid API key: `+key+`"}}`)
+		_, _ = io.WriteString(w, `{"error":{"message":"Invalid API key: `+key+`"}}`)
 	}))
 	defer srv.Close()
 
@@ -252,7 +252,7 @@ func TestStreamAuthErrorRedactsEchoedKey(t *testing.T) {
 func TestStreamOtherStatusIsPlainError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, `{"error":{"message":"malformed request"}}`)
+		_, _ = io.WriteString(w, `{"error":{"message":"malformed request"}}`)
 	}))
 	defer srv.Close()
 
@@ -274,7 +274,7 @@ func TestStreamOtherStatusIsPlainError(t *testing.T) {
 func TestStreamServerErrorIsUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		io.WriteString(w, `{"error":{"message":"upstream exploded"}}`)
+		_, _ = io.WriteString(w, `{"error":{"message":"upstream exploded"}}`)
 	}))
 	defer srv.Close()
 
@@ -353,7 +353,7 @@ func TestModelsAcceptsEitherContextField(t *testing.T) {
 		if r.URL.Path != "/models" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
-		io.WriteString(w, `{"data":[
+		_, _ = io.WriteString(w, `{"data":[
 			{"id":"a","context_window":8192},
 			{"id":"b","context_length":32768},
 			{"id":"c"}
@@ -389,7 +389,7 @@ func TestModelsCarriesPricingThroughToTiers(t *testing.T) {
 		if r.URL.Path != "/models" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
-		io.WriteString(w, `{"data":[
+		_, _ = io.WriteString(w, `{"data":[
 			{"id":"openai-gpt-oss-120b","name":"GPT OSS 120B","context_length":128000,
 			 "pricing":{"prompt":"0.0000000700","completion":"0.0000003000"}},
 			{"id":"gratis","context_length":8192,
@@ -438,7 +438,7 @@ func TestModelsCarriesPricingThroughToTiers(t *testing.T) {
 func TestModelsPropagatesTypedErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, `{"error":{"message":"bad key"}}`)
+		_, _ = io.WriteString(w, `{"error":{"message":"bad key"}}`)
 	}))
 	defer srv.Close()
 
@@ -467,47 +467,6 @@ func TestRetryAfterAbsentOrUnparseable(t *testing.T) {
 		if got := retryAfter(resp); got != 0 {
 			t.Errorf("Retry-After %q gave %v, want 0", v, got)
 		}
-	}
-}
-
-func TestLooksLikeKey(t *testing.T) {
-	keys := []string{
-		"sk-abcdef",
-		"sk_abcdef",
-		"gsk_abcdef",
-		"AIzaSyAbCdEf",
-		"or-v1-abc",
-		"abcdefghijklmnopqrstuvwxyz012345", // long and opaque
-	}
-	for _, k := range keys {
-		if !looksLikeKey(k) {
-			t.Errorf("looksLikeKey(%q) = false, want true", k)
-		}
-	}
-
-	notKeys := []string{
-		"hello",
-		"rate limit reached",
-		"short-token",
-		"a sentence that is long enough overall", // spaces disqualify
-	}
-	for _, s := range notKeys {
-		if looksLikeKey(s) {
-			t.Errorf("looksLikeKey(%q) = true, want false", s)
-		}
-	}
-}
-
-func TestRedactKeyishKeepsSurroundingText(t *testing.T) {
-	got := redactKeyish(`Invalid API key: "gsk_abcdefghijklmnop", try again.`)
-	if strings.Contains(got, "gsk_") {
-		t.Errorf("redaction left the key behind: %q", got)
-	}
-	if !strings.HasPrefix(got, "Invalid API key:") {
-		t.Errorf("redaction damaged the message: %q", got)
-	}
-	if !strings.Contains(got, "try again.") {
-		t.Errorf("redaction dropped trailing text: %q", got)
 	}
 }
 
@@ -559,7 +518,7 @@ func TestStreamOmitsToolsKeyWhenEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "data: [DONE]\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(srv.Close)
 
@@ -805,10 +764,10 @@ func TestBaseURLKeepsItsPathSegments(t *testing.T) {
 				switch r.URL.Path {
 				case prefix + "/chat/completions":
 					w.Header().Set("Content-Type", "text/event-stream")
-					io.WriteString(w, frame(`{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`))
-					io.WriteString(w, "data: [DONE]\n\n")
+					_, _ = io.WriteString(w, frame(`{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`))
+					_, _ = io.WriteString(w, "data: [DONE]\n\n")
 				case prefix + "/models":
-					io.WriteString(w, `{"data":[{"id":"gemini-2.0-flash","context_length":1048576}]}`)
+					_, _ = io.WriteString(w, `{"data":[{"id":"gemini-2.0-flash","context_length":1048576}]}`)
 				default:
 					w.WriteHeader(http.StatusNotFound)
 				}
@@ -853,8 +812,8 @@ func TestEmptyModelIsAbsentFromTheBody(t *testing.T) {
 			t.Errorf("request body is not valid JSON: %v", err)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, frame(`{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`))
-		io.WriteString(w, "data: [DONE]\n\n")
+		_, _ = io.WriteString(w, frame(`{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`))
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
 

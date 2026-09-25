@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 func TestOutputLimitPreservesAnswerAndExplainsCutoff(t *testing.T) {

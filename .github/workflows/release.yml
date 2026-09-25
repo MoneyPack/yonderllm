@@ -1,0 +1,143 @@
+# Release builds for yonderllm.
+#
+# Pushing a tag of the form v* produces a GitHub release carrying one binary
+# per supported target plus SHA256SUMS.txt. The asset names match what earlier
+# hand-built releases uploaded (yonderllm-<os>-<arch>[.exe]), because the
+# README and docs/INSTALL.md link to them by name and a rename would break
+# every existing download link.
+#
+# The build is deliberately plain `go build` rather than a release tool: the
+# project ships six static binaries and a checksum file, and reproducing that
+# needs nothing beyond the Go toolchain already required by CI.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # The release must never outrun CI. Re-running the checks here, rather than
+  # trusting that the tagged commit was green on main, means a tag pushed from
+  # a branch or before CI finished still cannot publish a broken build.
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Known vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      # Every target is built even if one fails, so the log shows which
+      # platforms are affected rather than stopping at the first.
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64, ext: .exe }
+          - { goos: windows, goarch: arm64, ext: .exe }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          # Pure Go on purpose: a static binary with no libc dependency is
+          # what lets one linux build run on every distribution.
+          CGO_ENABLED: '0'
+        # The three -X values are the contract documented in
+        # docs/COMPATIBILITY.md; `yonderllm version --json` reports them.
+        # -trimpath keeps runner paths out of the binary so builds are
+        # comparable across machines.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          commit="${GITHUB_SHA}"
+          date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          module="github.com/MoneyPack/yonderllm/internal/cli"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X ${module}.Version=${version} -X ${module}.BuildCommit=${commit} -X ${module}.BuildDate=${date}" \
+            -o "dist/yonderllm-${GOOS}-${GOARCH}${{ matrix.ext }}" ./cmd/yonderllm
+
+      - name: Smoke test
+        # Only the runner's own platform can execute its binary; the others
+        # are verified by the cross-build succeeding at all.
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          ./dist/yonderllm-linux-amd64 version --json
+          ./dist/yonderllm-linux-amd64 version --json | grep -q "\"version\":\"${GITHUB_REF_NAME#v}\""
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yonderllm-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Creating the release and uploading assets is the one write this
+      # workflow performs.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        # One file covering every binary, written in the form
+        # `sha256sum --check` reads, so a downloader can verify with the
+        # command docs/INSTALL.md shows.
+        run: |
+          cd dist
+          sha256sum yonderllm-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # A tag with a pre-release suffix (v0.2.0-rc.3) is published as a
+        # pre-release so "Latest" keeps pointing at the last stable build.
+        # The body links to CHANGELOG.md, the curated record, and gh appends
+        # notes generated from the merged pull requests below it.
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          printf 'See [CHANGELOG.md](https://github.com/%s/blob/%s/CHANGELOG.md) for the curated list of changes.\n' \
+            "${GITHUB_REPOSITORY}" "${tag}" > notes.md
+          args=(--title "yonderllm ${tag}" --notes-file notes.md --generate-notes --verify-tag)
+          case "${tag}" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh release create "${tag}" "${args[@]}" dist/*

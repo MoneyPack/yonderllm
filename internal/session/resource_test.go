@@ -1,21 +1,10 @@
 package session
 
 import (
-	"strings"
 	"testing"
-	"yonderllm/internal/provider"
-)
 
-func TestPlainRedactionDoesNotAllocate(t *testing.T) {
-	text := strings.Repeat("ordinary prose ", 100)
-	if n := testing.AllocsPerRun(100, func() {
-		if redactable(text) != text {
-			panic("changed text")
-		}
-	}); n != 0 {
-		t.Fatalf("plain text allocated %g times", n)
-	}
-}
+	"github.com/MoneyPack/yonderllm/internal/provider"
+)
 
 func TestTurnsCannotMutateToolCalls(t *testing.T) {
 	h := History{}

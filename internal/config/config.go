@@ -39,6 +39,12 @@ type ProviderConfig struct {
 	APIKeyEnv         string            `toml:"api_key_env"`
 	OmitStreamOptions bool              `toml:"omit_stream_options"`
 	HeaderEnv         map[string]string `toml:"header_env"`
+	// ContextWindow is the model's context window in tokens, used to decide
+	// how much history to send. Zero means unknown, and the session then
+	// trims to a conservative default. It is per provider rather than per
+	// model because the config names one model per provider; a user who
+	// switches models with /model keeps the window they configured.
+	ContextWindow int `toml:"context_window"`
 
 	// apiKey is resolved at load time and is never serialized.
 	apiKey string
@@ -82,8 +88,18 @@ type Config struct {
 	Providers map[string]ProviderConfig `toml:"providers"`
 }
 
-// defaults returns a Config with the built-in values and the free-tier
-// providers registered, before any file or environment is read.
+// Defaults returns a Config with the built-in values and the free-tier
+// providers registered, before any file or environment is read. Each call
+// returns a fresh value, so a caller may edit the result freely.
+//
+// It is exported so that `config init` can write the starter file from the
+// same table Load starts from: a default model that lives in two places is a
+// default model that will drift.
+func Defaults() Config {
+	return defaults()
+}
+
+// defaults is the built-in table behind Defaults.
 func defaults() Config {
 	return Config{
 		Provider:       DefaultProvider,
@@ -140,19 +156,16 @@ func Load(path string) (Config, error) {
 	cfg := defaults()
 
 	if path != "" {
-		data, err := os.ReadFile(path)
+		data, err := readConfigFile(path)
 		switch {
 		case err == nil:
-			if err := validateFilePermissions(path); err != nil {
-				return Config{}, err
-			}
 			if err := mergeTOML(&cfg, data); err != nil {
 				return Config{}, fmt.Errorf("parsing %s: %w", path, err)
 			}
 		case os.IsNotExist(err):
 			// Running without a config file is a supported setup.
 		default:
-			return Config{}, fmt.Errorf("reading %s: %w", path, err)
+			return Config{}, err
 		}
 	}
 
@@ -165,13 +178,48 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-func validateFilePermissions(path string) error {
+// readConfigFile returns the file's contents once the file itself has been
+// judged safe to read. A missing file is reported with an error that satisfies
+// os.IsNotExist, so the caller can treat it as "no configuration".
+//
+// The file is inspected with Lstat before it is opened, and the inspection is
+// what the permission check runs on. Stat would follow a symlink and report
+// the target, so a 0600 link pointing at a world-readable file — or at a
+// device or FIFO that blocks on open — would pass. Refusing anything but a
+// regular file closes that off; a user who wants their config elsewhere can
+// point YONDERLLM_CONFIG at the real file.
+func readConfigFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("checking %s: %w", path, err)
+	}
+	if err := validateFile(path, info); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// validateFile refuses anything other than a regular file and, where the
+// platform has POSIX mode bits, anything readable by group or other. Windows
+// expresses access through ACLs that mode bits do not reflect, so only the
+// file-type check applies there.
+func validateFile(path string, info os.FileInfo) error {
+	if !info.Mode().IsRegular() {
+		kind := "not a regular file"
+		if info.Mode()&os.ModeSymlink != 0 {
+			kind = "a symbolic link"
+		}
+		return fmt.Errorf("config file %s is %s; refusing to read it", path, kind)
+	}
 	if runtime.GOOS == "windows" {
 		return nil
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("checking config permissions: %w", err)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("config file %s is accessible to group or other users; set permissions to 0600", path)
@@ -233,6 +281,9 @@ func mergeTOML(cfg *Config, data []byte) error {
 		}
 		if md.IsDefined("providers", name, "api_key_env") {
 			base.APIKeyEnv = fp.APIKeyEnv
+		}
+		if md.IsDefined("providers", name, "context_window") {
+			base.ContextWindow = fp.ContextWindow
 		}
 		cfg.Providers[name] = base
 	}
@@ -305,6 +356,11 @@ func (c Config) Validate() error {
 		}
 		if err := validateBaseURL(name, p.BaseURL); err != nil {
 			return err
+		}
+		// Zero is "unknown" and is allowed; anything below it is a typo
+		// that would otherwise silently become the default window.
+		if p.ContextWindow < 0 {
+			return fmt.Errorf("provider %q context_window must be a positive token count, got %d", name, p.ContextWindow)
 		}
 	}
 	return nil

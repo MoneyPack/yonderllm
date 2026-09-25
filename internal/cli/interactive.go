@@ -4,8 +4,8 @@ import (
 	"io"
 	"os"
 
-	"yonderllm/internal/perm"
-	"yonderllm/internal/tui"
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/tui"
 )
 
 // This file is the seam between the command line and the full-screen

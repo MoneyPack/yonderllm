@@ -3,10 +3,10 @@ package session
 import (
 	"context"
 	"errors"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 	"iter"
 	"testing"
 	"time"
-	"yonderllm/internal/provider"
 )
 
 func TestConfiguredRetriesAreBoundedAndNeverRepeatPartialText(t *testing.T) {

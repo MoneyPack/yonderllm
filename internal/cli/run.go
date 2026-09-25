@@ -7,9 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
-	"yonderllm/internal/terminaltext"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/terminaltext"
 )
 
 // newRunCmd builds the headless command.
@@ -77,6 +77,13 @@ yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'`,
 	cmd.Flags().BoolVar(&appendStdin, "stdin", false, "append piped stdin to the prompt argument")
 	return cmd
 }
+
+// ndjsonSchemaVersion is the version stamped on every `run --json` event and
+// reported by `version`. It is one constant so the two cannot disagree: a
+// consumer checks the version command to learn what the stream will say.
+// Bump it only for a change that breaks an existing consumer; additive fields
+// do not count, and docs/COMPATIBILITY.md tells consumers to tolerate them.
+const ndjsonSchemaVersion = 1
 
 // wireEvent is the on-the-wire shape of an event.
 //
@@ -155,11 +162,21 @@ func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, 
 	enc := json.NewEncoder(terminaltext.Raw(cmd.OutOrStdout()))
 
 	var outputErr error
-	emit := func(ev wireEvent) {
-		ev.SchemaVersion = 1
-		ev.Model = sess.Model()
+	// emit stamps the schema version and the provider/model that produced
+	// the event. Both come from the session event, not from the session:
+	// after a fallback the session still names the provider the user chose,
+	// while the answer is coming from another one, and a consumer reading
+	// the stream is entitled to know which. The session's values are only a
+	// last resort for events that carry none, such as a failure before any
+	// provider was reached.
+	emit := func(src session.Event, ev wireEvent) {
+		ev.SchemaVersion = ndjsonSchemaVersion
+		ev.Provider, ev.Model = src.Provider, src.Model
 		if ev.Provider == "" {
 			ev.Provider = sess.Provider()
+		}
+		if ev.Model == "" {
+			ev.Model = sess.Model()
 		}
 		if outputErr == nil {
 			outputErr = enc.Encode(ev)
@@ -168,7 +185,7 @@ func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, 
 
 	for ev, err := range sess.Ask(ctx, prompt) {
 		if err != nil {
-			emit(wireEvent{Type: "error", Error: err.Error()})
+			emit(ev, wireEvent{Type: "error", Error: err.Error()})
 			if outputErr != nil {
 				return outputErr
 			}
@@ -177,14 +194,14 @@ func streamJSON(ctx context.Context, cmd *cobra.Command, sess *session.Session, 
 		switch {
 		case ev.Tool != nil:
 			typ, t := newWireTool(ev.Tool)
-			emit(wireEvent{Type: typ, Provider: ev.Provider, Tool: t})
+			emit(ev, wireEvent{Type: typ, Tool: t})
 		case ev.Notice != "":
-			emit(wireEvent{Type: "notice", Notice: ev.Notice, Provider: ev.Provider})
+			emit(ev, wireEvent{Type: "notice", Notice: ev.Notice})
 		case ev.Delta != "":
-			emit(wireEvent{Type: "delta", Delta: ev.Delta, Provider: ev.Provider})
+			emit(ev, wireEvent{Type: "delta", Delta: ev.Delta})
 		}
 		if ev.Done {
-			emit(wireEvent{Type: "done", Provider: ev.Provider, Usage: newWireUsage(ev.Usage)})
+			emit(ev, wireEvent{Type: "done", Usage: newWireUsage(ev.Usage)})
 		}
 		if outputErr != nil {
 			return outputErr

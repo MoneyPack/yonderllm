@@ -41,29 +41,42 @@ type styles struct {
 	cursor      lipgloss.Style
 }
 
-// newStyles builds the style set.
+// newStyles builds the style set for the terminal lipgloss found on standard
+// output, which is what tests and any caller without a writer of its own get.
 func newStyles() styles {
+	return stylesFor(lipgloss.DefaultRenderer())
+}
+
+// stylesFor builds the style set for one renderer.
+//
+// Run hands in a renderer made from the writer the program actually draws to,
+// so that the colour profile — NO_COLOR, TERM, whether the output is a terminal
+// at all — is judged against that writer. The default renderer judges standard
+// output, which is the wrong answer whenever the two differ: a program drawing
+// to a pipe would emit colour, and one drawing to a terminal while standard
+// output was redirected would emit none.
+func stylesFor(r *lipgloss.Renderer) styles {
 	return styles{
 		// The brand chip is the one piece of the interface that never
 		// changes and never scrolls away: the name is the frame the
 		// rest of the session sits inside.
-		brand:    lipgloss.NewStyle().Bold(true).Foreground(brandInk).Background(brandFG).Padding(0, 1),
-		meta:     lipgloss.NewStyle().Foreground(mutedFG),
-		metaKey:  lipgloss.NewStyle().Bold(true).Foreground(brandFG),
-		rule:     lipgloss.NewStyle().Foreground(ruleFG),
-		userTag:  lipgloss.NewStyle().Bold(true).Foreground(userFG),
-		botTag:   lipgloss.NewStyle().Bold(true).Foreground(brandFG),
-		toolTag:  lipgloss.NewStyle().Bold(true).Foreground(toolFG),
-		notice:   lipgloss.NewStyle().Foreground(noticeFG),
-		errorTag: lipgloss.NewStyle().Bold(true).Foreground(errorFG),
+		brand:    r.NewStyle().Bold(true).Foreground(brandInk).Background(brandFG).Padding(0, 1),
+		meta:     r.NewStyle().Foreground(mutedFG),
+		metaKey:  r.NewStyle().Bold(true).Foreground(brandFG),
+		rule:     r.NewStyle().Foreground(ruleFG),
+		userTag:  r.NewStyle().Bold(true).Foreground(userFG),
+		botTag:   r.NewStyle().Bold(true).Foreground(brandFG),
+		toolTag:  r.NewStyle().Bold(true).Foreground(toolFG),
+		notice:   r.NewStyle().Foreground(noticeFG),
+		errorTag: r.NewStyle().Bold(true).Foreground(errorFG),
 		// The approval prompt borrows the notice colour, because it is
 		// the same sort of claim — the session telling the user
 		// something about itself rather than a model speaking — but it
 		// is bold, since it is asking rather than reporting.
-		approvalTag: lipgloss.NewStyle().Bold(true).Foreground(noticeFG),
-		body:        lipgloss.NewStyle(),
-		muted:       lipgloss.NewStyle().Foreground(mutedFG),
-		footer:      lipgloss.NewStyle().Foreground(mutedFG),
-		cursor:      lipgloss.NewStyle().Bold(true).Foreground(brandFG),
+		approvalTag: r.NewStyle().Bold(true).Foreground(noticeFG),
+		body:        r.NewStyle(),
+		muted:       r.NewStyle().Foreground(mutedFG),
+		footer:      r.NewStyle().Foreground(mutedFG),
+		cursor:      r.NewStyle().Bold(true).Foreground(brandFG),
 	}
 }

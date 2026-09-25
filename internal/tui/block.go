@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"yonderllm/internal/terminaltext"
+	"github.com/MoneyPack/yonderllm/internal/terminaltext"
 )
 
 // kind distinguishes the sorts of thing that can appear in the transcript.
@@ -58,7 +58,9 @@ func (b block) render(s styles, width int) string {
 	if width < 8 {
 		width = 8
 	}
-	body := lipgloss.NewStyle().Width(width).Render(strings.TrimRight(b.text, "\n"))
+	// The body style comes from the set rather than a fresh lipgloss.NewStyle
+	// so that it belongs to the same renderer as everything else drawn.
+	body := s.body.Width(width).Render(strings.TrimRight(b.text, "\n"))
 
 	switch b.kind {
 	case blockUser:

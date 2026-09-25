@@ -1,15 +1,12 @@
 package session
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/gofrs/flock"
 )
 
 // Only the shared daily count is persisted. Token totals remain per session.
@@ -53,17 +50,11 @@ func (u *Usage) transaction(change func(*usageState) error) error {
 	if err := os.MkdirAll(filepath.Dir(u.path), 0700); err != nil {
 		return fmt.Errorf("daily usage storage: %w", err)
 	}
-	lock := flock.New(u.path + ".lock")
-	defer lock.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	locked, err := lock.TryLockContext(ctx, 10*time.Millisecond)
+	unlock, err := lockFile(u.path + ".lock")
 	if err != nil {
 		return fmt.Errorf("lock daily usage: %w", err)
 	}
-	if !locked {
-		return errors.New("lock daily usage: timed out")
-	}
+	defer unlock()
 
 	today := startOfDay(u.now())
 	state := usageState{Day: today.Format(time.DateOnly)}

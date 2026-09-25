@@ -1,8 +1,8 @@
 package tui
 
 import (
+	"github.com/MoneyPack/yonderllm/internal/session"
 	"testing"
-	"yonderllm/internal/session"
 )
 
 func TestCutoffNoticeFollowsPartialAnswer(t *testing.T) {

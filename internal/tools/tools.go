@@ -27,13 +27,15 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strconv"
 	"strings"
+	"unicode"
 
-	"yonderllm/internal/perm"
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
-	"yonderllm/internal/shell"
-	"yonderllm/internal/workspace"
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/shell"
+	"github.com/MoneyPack/yonderllm/internal/workspace"
 )
 
 // maxResultBytes caps a single tool result.
@@ -67,6 +69,30 @@ type Request struct {
 // the outcome of every path an implementation forgets to handle.
 type Approver func(ctx context.Context, req Request) bool
 
+// Option adjusts how the tools [For] returns behave. Options exist so that the
+// composition root can pass in what only it knows — which environment
+// variables hold credentials — without every other caller having to say
+// anything: a call with no options gets the previous behaviour.
+type Option func(*settings)
+
+// settings collects what the options set.
+type settings struct {
+	// hiddenEnv names environment variables a command must not inherit.
+	hiddenEnv []string
+}
+
+// HideEnv names environment variables that run_command's children must never
+// see, over and above the well-known credential names shell strips on its
+// own. The composition root passes the api_key_env and header_env names the
+// configuration resolved, because those are the variables this program has
+// been told hold secrets and a child that could print them would hand them to
+// the provider and the autosaved transcript in one step.
+func HideEnv(names ...string) Option {
+	return func(s *settings) {
+		s.hiddenEnv = append(s.hiddenEnv, names...)
+	}
+}
+
 // For returns the tools policy permits, in a stable order.
 //
 // A capability the policy denies is never described to the model. One the
@@ -74,7 +100,12 @@ type Approver func(ctx context.Context, req Request) bool
 // because a tool that cannot ask cannot honour the gate; withholding it is
 // what the specification means by a capability being absent from a
 // non-interactive run.
-func For(policy perm.Policy, approver Approver) []session.Tool {
+func For(policy perm.Policy, approver Approver, opts ...Option) []session.Tool {
+	var s settings
+	for _, opt := range opts {
+		opt(&s)
+	}
+
 	permitted := func(action perm.Action) bool {
 		switch policy.Check(action) {
 		case perm.Allow:
@@ -88,7 +119,7 @@ func For(policy perm.Policy, approver Approver) []session.Tool {
 
 	var out []session.Tool
 	if permitted(perm.Read) {
-		out = append(out, readTool(policy))
+		out = append(out, readTool(policy, approver))
 	}
 	if permitted(perm.Search) {
 		out = append(out, searchTool(policy))
@@ -97,13 +128,21 @@ func For(policy perm.Policy, approver Approver) []session.Tool {
 		out = append(out, writeTool(policy, approver))
 	}
 	if permitted(perm.Exec) {
-		out = append(out, execTool(policy, approver))
+		out = append(out, execTool(policy, approver, s.hiddenEnv))
 	}
 	return out
 }
 
 // readTool describes and implements reading one file.
-func readTool(policy perm.Policy) session.Tool {
+//
+// Reading is allowed outright in code and agent mode, with one exception: a
+// file whose name says it holds a credential. What a model reads goes to a
+// third party and into the autosaved transcript, so .env or id_rsa is not a
+// read the mode's blanket permission should cover. Code mode refuses it, since
+// a mode that proposes patches has no need of a key; agent mode puts it to the
+// reader through the same confirmation a destructive command gets, so that
+// --yes does not waive it and a reader who does want the read can say so.
+func readTool(policy perm.Policy, approver Approver) session.Tool {
 	return session.Tool{
 		Definition: provider.Tool{
 			Name: "read_file",
@@ -132,6 +171,33 @@ func readTool(policy perm.Policy) session.Tool {
 			}
 			if strings.TrimSpace(args.Path) == "" {
 				return "", errNeeds("path")
+			}
+
+			if workspace.Credential(args.Path) {
+				if policy.Mode() != perm.Agent {
+					return "", fmt.Errorf("%s looks like a credential file and is not "+
+						"read in %s mode; ask the user for the value you need instead",
+						args.Path, policy.Mode())
+				}
+				// Checked before prompting, as the write tool does: a
+				// reader who has walked away is not asked anything.
+				if err := ctx.Err(); err != nil {
+					return "", err
+				}
+				ok, err := consent(ctx, policy, approver, Request{
+					Action: perm.Read,
+					Target: args.Path,
+					Detail: "this file looks like it holds a credential; its contents " +
+						"would be sent to the model and kept in the saved conversation",
+				}, true)
+				if err != nil {
+					return "", err
+				}
+				if !ok {
+					return fmt.Sprintf("the user refused to let you read %s; it looks "+
+						"like a credential file. Ask what they would prefer instead "+
+						"of trying again.", args.Path), nil
+				}
 			}
 
 			ws, err := open(ctx, policy)
@@ -188,7 +254,7 @@ func searchTool(policy perm.Policy) session.Tool {
 			}
 			defer ws.Close()
 
-			matches, err := ws.Search(args.Query)
+			matches, err := ws.Search(ctx, args.Query)
 			if err != nil {
 				return "", err
 			}
@@ -203,6 +269,12 @@ func searchTool(policy perm.Policy) session.Tool {
 // only layer that knows both what the change is and who could consent to it.
 // The old contents are read before the write so the question can show a diff:
 // a person asked to approve a path and a byte count has been told nothing.
+//
+// A write is marked destructive when the file is one a later ordinary command
+// runs — a hook, a Makefile, a manifest, anything under a dot-directory — so
+// that auto-approval does not waive the question. Under --yes a model could
+// otherwise write .githooks/pre-commit and then trigger it with a `git commit`
+// the tables call harmless; confirming the write is where that chain is cut.
 func writeTool(policy perm.Policy, approver Approver) session.Tool {
 	return session.Tool{
 		Definition: provider.Tool{
@@ -257,11 +329,17 @@ func writeTool(policy perm.Policy, approver Approver) session.Tool {
 				return "", fmt.Errorf("cannot snapshot file before approval: %w", readErr)
 			}
 			detail := changeFrom(original, readErr, args.Content)
+			destructive := workspace.Hook(args.Path)
+			if destructive {
+				detail = "this file is one a build tool, package manager or shell " +
+					"runs without being asked, so the write is confirmed even under " +
+					"auto-approval\n\n" + detail
+			}
 			ok, err := consent(ctx, policy, approver, Request{
 				Action: perm.Write,
 				Target: args.Path,
 				Detail: detail,
-			}, false)
+			}, destructive)
 			if err != nil {
 				return "", err
 			}
@@ -294,7 +372,10 @@ func writeTool(policy perm.Policy, approver Approver) session.Tool {
 // place where quoting turns one command into another. A vector the model wrote
 // is the vector that runs, which is also the only form honest enough to show a
 // person being asked to approve it.
-func execTool(policy perm.Policy, approver Approver) session.Tool {
+//
+// hiddenEnv is handed to the runner so the child never inherits the
+// configured credentials; see [HideEnv].
+func execTool(policy perm.Policy, approver Approver, hiddenEnv []string) session.Tool {
 	return session.Tool{
 		Definition: provider.Tool{
 			Name: "run_command",
@@ -337,7 +418,7 @@ func execTool(policy perm.Policy, approver Approver) session.Tool {
 				return "", err
 			}
 
-			runner, err := shell.Current(policy)
+			runner, err := shell.Current(policy, hiddenEnv...)
 			if err != nil {
 				return "", err
 			}
@@ -395,18 +476,13 @@ func consent(ctx context.Context, policy perm.Policy, approver Approver, req Req
 	}
 }
 
-// change describes what writing content to name would do.
+// changeFrom describes what writing content over old would do.
 //
 // A file that cannot be read is not an obstacle to approving a write: what is
 // on disk being unshowable is itself worth telling the person, and refusing
 // the write over it would make binary and oversized files permanently
 // unwritable. Missing and unreadable are worded apart because one is a new
 // file and the other is a file about to be destroyed.
-func change(ws *workspace.Workspace, name, content string) string {
-	old, err := ws.ReadFile(name)
-	return changeFrom(old, err, content)
-}
-
 func changeFrom(old []byte, err error, content string) string {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -434,16 +510,30 @@ func wroteView(name, content string) string {
 // rm "my file" has to be able to tell it from rm my file, which would delete
 // two different things, and a prompt that blurs the two would be worse than
 // no prompt at all.
+//
+// An argument holding a rune that does not print is quoted for the same
+// reason, since %q spells such runes out as escapes. A carriage return can
+// overwrite the start of the line the reader is judging, and a bidirectional
+// control can make `rm -rf ./build` read as something else entirely; both are
+// text a model could put in a vector, and both have to be visible in the
+// question before the answer can mean anything.
 func commandView(args []string) string {
 	parts := make([]string, len(args))
 	for i, arg := range args {
-		if arg == "" || strings.ContainsAny(arg, " \t\n\"'") {
+		if arg == "" || strings.ContainsAny(arg, " \t\n\"'") || strings.ContainsFunc(arg, unprintable) {
 			parts[i] = fmt.Sprintf("%q", arg)
 			continue
 		}
 		parts[i] = arg
 	}
 	return strings.Join(parts, " ")
+}
+
+// unprintable reports a rune a terminal would not show as itself: controls in
+// either range, format characters such as the bidirectional overrides and
+// zero-width joiners, and anything strconv would escape when quoting.
+func unprintable(r rune) bool {
+	return !strconv.IsPrint(r) || unicode.Is(unicode.Bidi_Control, r) || unicode.Is(unicode.Cf, r)
 }
 
 // ranView renders a finished command for the model.

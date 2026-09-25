@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 // CapError reports that the daily request cap has been reached. It is returned

@@ -3,8 +3,8 @@ package cli
 import (
 	"testing"
 
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
 )
 
 func TestSaveResumeLastAndDelete(t *testing.T) {

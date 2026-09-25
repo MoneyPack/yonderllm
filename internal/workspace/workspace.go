@@ -17,6 +17,7 @@
 package workspace
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/perm"
 )
 
 // Limits on what a single request may pull in. They exist so that pointing
@@ -111,6 +112,12 @@ func (w *Workspace) Close() error { return w.root.Close() }
 // ReadFile returns the contents of one file inside the workspace. The name is
 // interpreted relative to the root; anything that would leave the root is
 // refused, whether it says so plainly or arrives through a symlink.
+//
+// The directories Search never enters are refused here too. Search skips them
+// because a match there says nothing about the project; a read is refused for
+// the stronger reason that .git holds the repository's configuration and
+// credentials helpers, and a model that cannot find a file by searching should
+// not be able to name it and read it anyway.
 func (w *Workspace) ReadFile(name string) ([]byte, error) {
 	if err := w.authorize(perm.Read); err != nil {
 		return nil, err
@@ -118,6 +125,9 @@ func (w *Workspace) ReadFile(name string) ([]byte, error) {
 	rel, err := relative(name)
 	if err != nil {
 		return nil, err
+	}
+	if inSkippedDir(filepath.Clean(rel)) {
+		return nil, fmt.Errorf("workspace: read %s: %w", name, errSkippedDir)
 	}
 
 	info, err := w.root.Stat(rel)
@@ -181,7 +191,13 @@ func readLimited(r io.Reader) ([]byte, error) {
 // Files that cannot be read are skipped rather than reported, because a search
 // that abandons a whole tree over one unreadable corner of it is less useful
 // than one that returns what it found.
-func (w *Workspace) Search(query string) ([]Match, error) {
+//
+// The walk stops when ctx is done. A tree can be large enough that the walk is
+// the slow part of an exchange, and a reader who has pressed ctrl+c should not
+// wait for it to finish visiting files whose results will be thrown away. The
+// error is the context's own, wrapped, so a caller can tell an interrupted
+// search from a broken one.
+func (w *Workspace) Search(ctx context.Context, query string) ([]Match, error) {
 	if err := w.authorize(perm.Search); err != nil {
 		return nil, err
 	}
@@ -190,10 +206,26 @@ func (w *Workspace) Search(query string) ([]Match, error) {
 		return nil, errors.New("workspace: search needs something to look for")
 	}
 
-	fsys := w.root.FS()
 	var matches []Match
+	err := fs.WalkDir(w.root.FS(), ".", w.searcher(ctx, needle, &matches))
+	if err != nil {
+		return nil, fmt.Errorf("workspace: search %s: %w", w.name, err)
+	}
+	return matches, nil
+}
 
-	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+// searcher builds the callback Search walks with. It is separate so that the
+// one behaviour a whole-tree test cannot pin down — stopping between two
+// entries when the context is cancelled — can be exercised by calling it
+// directly with entries of the test's choosing.
+func (w *Workspace) searcher(ctx context.Context, needle string, matches *[]Match) fs.WalkDirFunc {
+	return func(path string, d fs.DirEntry, err error) error {
+		// Checked before anything else, including the error the walk
+		// reports, because a cancelled reader is owed a stop and not a
+		// diagnosis of the directory that failed to open.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -215,16 +247,12 @@ func (w *Workspace) Search(query string) ([]Match, error) {
 		if err != nil || isBinary(data) {
 			return nil
 		}
-		matches = appendMatches(matches, path, data, needle)
-		if len(matches) >= maxMatches {
+		*matches = appendMatches(*matches, path, data, needle)
+		if len(*matches) >= maxMatches {
 			return fs.SkipAll
 		}
 		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("workspace: search %s: %w", w.name, err)
 	}
-	return matches, nil
 }
 
 // WriteFile replaces the contents of one file inside the workspace, creating
@@ -243,6 +271,14 @@ func (w *Workspace) WriteFile(name string, content []byte) error {
 	rel, err := relative(name)
 	if err != nil {
 		return err
+	}
+	// Refused rather than confirmed, and here rather than at the tool layer:
+	// a hook under .git runs as the user on their next commit, so this is
+	// the one write no approval dialogue should be able to authorise, and a
+	// rule enforced in the package that holds the root cannot be skipped by
+	// a caller that forgot to ask.
+	if inGit(filepath.Clean(rel)) {
+		return fmt.Errorf("workspace: write %s: %w", name, errGitWrite)
 	}
 	if len(content) > maxFileBytes {
 		return fmt.Errorf("workspace: write %s: contents are larger than %d bytes", name, maxFileBytes)
@@ -286,12 +322,18 @@ func (w *Workspace) authorize(a perm.Action) error {
 // error when the real problem is that the name was never inside the
 // workspace. Escapes in particular arrive from the root carrying no sentinel
 // at all, so catching them lexically is the only way to say why they failed.
+//
+// Both platforms' spellings of a rooted name are refused on both platforms.
+// filepath.IsAbs answers for the host it was compiled for, and a name arrives
+// here as text a model wrote: on Unix, C:\Windows and \Windows are relative
+// as far as IsAbs is concerned, and the root would then refuse them with a
+// message about a missing file rather than about the boundary.
 func relative(name string) (string, error) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
 		return "", errors.New("workspace: no file named")
 	}
-	if filepath.IsAbs(trimmed) || strings.HasPrefix(trimmed, "/") {
+	if rooted(trimmed) {
 		return "", fmt.Errorf("workspace: %s is outside the workspace", name)
 	}
 	// Cleaning first means "sub/../../x" is judged by where it lands, not by
@@ -303,6 +345,30 @@ func relative(name string) (string, error) {
 	}
 	return rel, nil
 }
+
+// rooted reports whether a name starts from a fixed place on the machine
+// rather than from the workspace: an absolute path in the host's own terms, a
+// leading separator in either spelling (which covers UNC names), or a drive
+// letter, including the drive-relative C:notes.txt that carries no separator
+// to give itself away.
+func rooted(name string) bool {
+	if filepath.IsAbs(name) || name[0] == '/' || name[0] == '\\' {
+		return true
+	}
+	if len(name) >= 2 && name[1] == ':' {
+		c := name[0]
+		return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+	}
+	return false
+}
+
+// errSkippedDir and errGitWrite are the reasons a name inside the workspace is
+// still refused. They are values so a caller can recognise the refusal, and
+// they say what the reader should do about it, since the name itself was fine.
+var (
+	errSkippedDir = errors.New("is inside a directory this workspace does not read (version control, dependencies or build output)")
+	errGitWrite   = errors.New("is inside .git, which is never written: a hook there would run on the next commit")
+)
 
 // errNoFile is the workspace's own way of saying a name matched nothing. It
 // exists instead of a wrapped os.ErrNotExist because wrapping would append the

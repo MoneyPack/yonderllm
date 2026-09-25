@@ -75,7 +75,7 @@ func TestConfigShowProviderOrder(t *testing.T) {
 	if groq < 0 || gemini < 0 || openrouter < 0 || surplus < 0 {
 		t.Fatalf("not every provider row is present\n--- stdout ---\n%s", r.stdout)
 	}
-	if !(groq < gemini && gemini < openrouter && openrouter < surplus) {
+	if groq >= gemini || gemini >= openrouter || openrouter >= surplus {
 		t.Errorf("provider rows are out of order: groq=%d gemini=%d openrouter=%d surplus=%d\n--- stdout ---\n%s",
 			groq, gemini, openrouter, surplus, r.stdout)
 	}

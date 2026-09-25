@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoneyPack/yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/tools"
 	tea "github.com/charmbracelet/bubbletea"
-	"yonderllm/internal/perm"
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
-	"yonderllm/internal/tools"
 )
 
 type modeWriteProvider struct{ stubProvider }
@@ -169,15 +169,13 @@ func TestModeSwitchChangesLocalReadPermissions(t *testing.T) {
 	workspaceDir(t, map[string]string{"example.txt": "workspace content"})
 	m := newTestModel(t, &stubProvider{name: "stub"})
 	for _, text := range []string{"/mode code", "/read example.txt"} {
-		m = typing(m, text)
-		m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+		m, _ = command(t, m, text)
 	}
 	if !strings.Contains(m.blocks[len(m.blocks)-1].text, "workspace content") {
 		t.Fatal("code mode could not read file")
 	}
 	for _, text := range []string{"/mode chat", "/read example.txt"} {
-		m = typing(m, text)
-		m, _ = step(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+		m, _ = command(t, m, text)
 	}
 	if !strings.Contains(m.blocks[len(m.blocks)-1].text, "not permitted") {
 		t.Fatal("chat downgrade retained file access")

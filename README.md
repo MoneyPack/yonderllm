@@ -1,82 +1,50 @@
 # yonderllm
 
 [![CI](https://github.com/MoneyPack/yonderllm/actions/workflows/ci.yml/badge.svg)](https://github.com/MoneyPack/yonderllm/actions/workflows/ci.yml)
+[![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/MoneyPack/yonderllm?utm_source=oss&utm_medium=github&utm_campaign=MoneyPack%2Fyonderllm&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
 
 ## Your model lives yonder.
 
 **Bring a question. Stay in your terminal.**
 
 A terminal workspace for remote AI: explore an idea, understand a diff, and pick
-up a conversation where you left it.
+up a conversation where you left it. One executable, no model weights, no local
+inference runtime. Inference runs on the provider you choose; its availability
+and pricing apply.
 
-**[Download the preview](https://github.com/MoneyPack/yonderllm/releases/tag/v0.2.0-rc.1)**
-· [Quick start](#quick-start) · [Safety and control](docs/SAFETY.md)
-
----
-
-### Room to think. Tools when you choose.
-
-Start with a conversation. Move into code or agent mode when the task calls for
-workspace tools. The provider, model, and permission mode stay visible as you work.
+**[Download the preview (v0.2.0-rc.2)](https://github.com/MoneyPack/yonderllm/releases/tag/v0.2.0-rc.2)**
+· [Quick start](#quick-start) · [Safety and control](docs/SAFETY.md) · [Changelog](CHANGELOG.md)
 
 - **Your terminal, your workflow.** Chat interactively or pipe a diff into a focused question.
-- **Remote intelligence, local simplicity.** One executable. No model weights or local inference runtime to install.
+- **Control before capability.** Chat mode has no filesystem or shell tools. Code and agent modes add them, each action approved by you.
 - **A conversation you can return to.** Save, resume, and recover an interrupted answer with an explicit retry.
 
 ```powershell
 # With SURPLUS_API_KEY set in your environment:
 yonderllm -p surplus -m qwen3-coder-next
-```
-
-Or give an everyday task a little help:
-
-```powershell
 git diff --staged | yonderllm -p surplus -m qwen3-coder-next ask --stdin "Explain this change in two bullets."
 ```
-
-Inference runs on your chosen provider. Its availability and pricing apply.
-Chat mode starts without filesystem or shell tools; see [the permission model](docs/SAFETY.md)
-before enabling workspace actions.
-
----
-
-## Contents
-
-- [Install](#install)
-- [Quick start](#quick-start)
-- [Commands](#commands)
-- [Flags](#flags)
-- [Providers and API keys](#providers-and-api-keys)
-- [Configuration](#configuration)
-- [The TUI](#the-tui)
-- [Tools](#tools)
-- [Scripting with `run --json`](#scripting-with-run---json)
-- [Modes](#modes)
-- [Project layout](#project-layout)
-- [Development](#development)
 
 ---
 
 ## Install
 
-### Download one executable
+**Prebuilt binary.** The
+[v0.2.0-rc.2 preview](https://github.com/MoneyPack/yonderllm/releases/tag/v0.2.0-rc.2)
+ships Windows, Linux, and macOS builds for x86-64 and ARM64 plus a
+`SHA256SUMS.txt`. Download the matching file, verify it, rename it to
+`yonderllm` (or `yonderllm.exe`), and put it on PATH. For Windows x86-64 start
+with [yonderllm-windows-amd64.exe](https://github.com/MoneyPack/yonderllm/releases/download/v0.2.0-rc.2/yonderllm-windows-amd64.exe).
+The [stable release](https://github.com/MoneyPack/yonderllm/releases/latest)
+(v0.1.0) remains available.
 
-The **[v0.2.0-rc.1 preview](https://github.com/MoneyPack/yonderllm/releases/tag/v0.2.0-rc.1)**
-includes Windows, Linux, and macOS builds for x86-64 and ARM64. No Go installation
-is needed. Download the matching binary and `SHA256SUMS.txt`; verification and
-platform instructions are on the release page.
+**`go install`** (Go 1.27 or newer):
 
-For Windows x86-64, start with
-**[yonderllm-windows-amd64.exe](https://github.com/MoneyPack/yonderllm/releases/download/v0.2.0-rc.1/yonderllm-windows-amd64.exe)**.
-After verifying it, rename it to `yonderllm.exe` and place it on PATH, or launch
-it directly from its download folder.
+```sh
+go install github.com/MoneyPack/yonderllm/cmd/yonderllm@latest
+```
 
-This is a release candidate for hands-on feedback. The
-[stable release](https://github.com/MoneyPack/yonderllm/releases/latest) remains available.
-
-### From source
-
-Requires Go 1.27 or newer.
+**From source:**
 
 ```sh
 git clone https://github.com/MoneyPack/yonderllm.git
@@ -85,58 +53,29 @@ mkdir -p bin
 go build -o bin/yonderllm ./cmd/yonderllm
 ```
 
-### Release build
+Verification commands, release builds with the version stamped in, and shell
+completion are in [docs/INSTALL.md](docs/INSTALL.md). A tag push builds and
+publishes the six binaries via [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
-Stripped, with the version stamped in:
+### Supported platforms
 
-```sh
-go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.1.0" \
-  -o bin/yonderllm ./cmd/yonderllm
-```
+| Platform | Status |
+| --- | --- |
+| Linux amd64, Windows amd64, macOS amd64 | Built and tested in CI on every push |
+| Linux arm64, macOS arm64 (Apple silicon), Windows arm64 | Cross-compiled for releases; not runtime-tested in CI |
 
-On Windows PowerShell:
-
-```powershell
-New-Item -ItemType Directory -Force .\bin | Out-Null
-go build -ldflags "-s -w -X yonderllm/internal/cli.Version=0.1.0" `
-  -o .\bin\yonderllm.exe .\cmd\yonderllm
-```
-
-Verify:
-
-```
-$ yonderllm --version
-yonderllm 0.1.0
-```
-
-### Shell completion
-
-```sh
-yonderllm completion bash   > /etc/bash_completion.d/yonderllm
-yonderllm completion zsh    > "${fpath[1]}/_yonderllm"
-yonderllm completion fish   > ~/.config/fish/completions/yonderllm.fish
-yonderllm completion powershell | Out-String | Invoke-Expression
-```
+Binaries are pure Go (`CGO_ENABLED=0`), unsigned and not notarized.
 
 ---
 
 ## Quick start
 
-Community: [contributing](CONTRIBUTING.md), [conduct](CODE_OF_CONDUCT.md),
-[security reporting](SECURITY.md), [issues](https://github.com/MoneyPack/yonderllm/issues).
-
-Detailed guides: [installation](docs/INSTALL.md), [providers](docs/PROVIDERS.md),
-[troubleshooting](docs/TROUBLESHOOTING.md), [scripting](docs/SCRIPTING.md),
-[safety](docs/SAFETY.md), and [development](docs/DEVELOPMENT.md).
-
-See [compatibility and versioning](docs/COMPATIBILITY.md) for the NDJSON contract
-and build metadata (`yonderllm version --json`).
-
 Set one API key and go. Groq's free tier needs no card:
 
 ```sh
-export GROQ_API_KEY=gsk_...
-yonderllm
+export GROQ_API_KEY=gsk_...      # PowerShell: $env:GROQ_API_KEY='gsk_...'
+yonderllm                         # interactive session
+yonderllm ask "explain the difference between a mutex and a semaphore"
 ```
 
 Check what yonderllm can see:
@@ -152,176 +91,74 @@ $ yonderllm providers
 Set the listed environment variable to enable a provider.
 ```
 
-The `*` marks the active provider. `ready` means a key was found in the
-environment. If the active provider has no key, yonderllm says so plainly
-rather than failing deep inside a request:
-
-```
-$ yonderllm models
-yonderllm: groq: authentication failed: no API key: set GROQ_API_KEY
-```
+The `*` marks the active provider; `ready` means a key was found. If the active
+provider has no key, yonderllm says so plainly rather than failing deep inside a
+request. Four providers are configured out of the box — `groq` (default),
+`gemini`, `openrouter`, `surplus` — and any OpenAI-compatible endpoint can be
+added in the config file. Keys are read from the environment only; the config
+file names the *variable*, never the secret. Details, default models, price
+tiers, and fallbacks: [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
 ---
 
 ## Commands
 
-| Command | What it does |
-| --- | --- |
-| *(none)* | Open the interactive TUI |
-| `ask` | Send one prompt, print the reply, exit |
-| `run` | Same as `ask`, but can emit machine-readable NDJSON |
-| `models` | List the models the active provider offers |
-| `providers` | Show every provider, its role, and whether its key is set |
-| `config` | Inspect or create the configuration file |
-| `completion` | Generate a shell completion script |
-| `help` | Help about any command |
-
-### `ask`
-
-The conversational one-shot. Reads the prompt from the arguments, or from
-stdin if there are none, so it composes with the rest of your shell.
+| Command | What it does | Own flags |
+| --- | --- | --- |
+| *(none)* | Open the interactive TUI | |
+| `ask [prompt]` | Send one prompt, stream the reply, exit; reads stdin when there is no argument | `-q, --quiet` suppress provider notices on stderr; `--stdin` append piped stdin to the prompt argument |
+| `run [prompt]` | Same as `ask`, but `--json` emits newline-delimited JSON events including tool calls | `--json`; `--stdin` |
+| `models [provider]` | List the free and cheap models a provider offers | `--all` include paid models; `--json` |
+| `providers` | Show every provider, its role, and whether its key is set | `--json` |
+| `config path` / `show` / `init` | Locate, print, or write the configuration file | `init --force` overwrite |
+| `sessions` / `sessions delete <name>` | List or remove saved conversations | |
+| `version` | Version, commit, build date, platform, NDJSON schema | `--json` |
+| `completion <shell>` | Shell completion script for `bash`, `zsh`, `fish`, or `powershell` | |
+| `help [command]` | Help for any command | |
 
 ```sh
-yonderllm ask "explain the difference between a mutex and a semaphore"
-
 git diff | yonderllm ask --stdin "write a commit message for this diff"
-
-yonderllm -p gemini ask "summarise the CAP theorem"
-```
-
-| Flag | Meaning |
-| --- | --- |
-| `-q`, `--quiet` | Print only the reply — no provider banner, no usage footer |
-
-### `run`
-
-The scriptable one-shot. Identical output to `ask` by default; with `--json`
-it emits one JSON object per line instead — including the model's tool calls,
-which plain output leaves out.
-
-```sh
-yonderllm run "hello"
 yonderllm run --json "hello" | jq -r 'select(.type=="delta").delta'
+yonderllm models openrouter --all
+yonderllm config show          # the effective configuration, every layer applied
+yonderllm run --resume project-notes "What should I change first?"
 ```
 
-| Flag | Meaning |
-| --- | --- |
-| `--json` | Emit newline-delimited JSON events instead of prose |
-
-### `models`
-
-```sh
-yonderllm models              # free and cheap models on the active provider
-yonderllm models --all        # everything the provider advertises
-yonderllm -p openrouter models
-```
-
-Every model is banded into one of four tiers by the price the provider
-advertises, measured in US dollars per million tokens:
-
-| Tier | Meaning |
-| --- | --- |
-| `free` | Both input and output are priced at zero |
-| `cheap` | Both input and output are at or under $1.00 per million tokens |
-| `paid` | Either side costs more than that |
-| `unknown` | The provider advertised no usable price |
-
-yonderllm hides the `paid` tier by default, because paying by accident is the
-one failure mode a client like this must not have. `free`, `cheap`, and
-`unknown` all pass the filter — an unpriced model is shown, and labelled
-honestly, rather than silently dropped. When the filter leaves nothing, it tells
-you rather than printing an empty table:
-
-```
-$ yonderllm -p openrouter models
-openrouter reports no free or cheap models. Try --all.
-```
-
-The table prints both halves of the price, input first:
-
-```
-$ yonderllm -p surplus models
-  MODEL                NAME          CONTEXT  PRICE/1M     TIER
-* openai-gpt-oss-120b  GPT OSS 120B  125K     0.07 / 0.30  cheap
-  gratis-8b            Gratis 8B     32K      0 / 0        free
-  silent-rates         Silent Rates  8K       unknown      unknown
-
-* active model for surplus
-```
-
-### `config`
-
-```sh
-yonderllm config path    # where the config file would be read from
-yonderllm config show    # the effective configuration, after all overrides
-yonderllm config init    # write a commented starter file
-```
-
-`config show` is the authority on what yonderllm actually believes, with every
-layer of precedence already applied. Reach for it before assuming a flag or an
-environment variable did what you meant.
-
----
+`run` with no prompt, no `--json`, no `--stdin` and a terminal on stdin opens
+the TUI; otherwise it is headless. `models` hides the `paid` tier by default
+because paying by accident is the one failure mode a client like this must not
+have. `config show` is the authority on what yonderllm actually believes.
 
 ## Flags
 
-These apply to every command and to the TUI.
+These persistent flags apply to every command and to the TUI.
 
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `-p`, `--provider` | string | from config | Provider to use |
-| `-m`, `--model` | string | provider's default | Model to use |
+| `-p`, `--provider` | string | from config | Provider to use first |
+| `-m`, `--model` | string | provider's default | Model id for the active provider |
 | `--mode` | string | `chat` | Permission mode: `chat`, `code`, or `agent` |
-| `--max-tokens` | int | from config | Cap the reply length |
-| `--daily-cap` | int | `-1` | Max requests per day; `-1` means use the config value |
-| `--config` | string | see below | Path to an alternate config file |
+| `--yes` | bool | off | Accept agent mode's writes and commands in advance (agent mode only; see [what it does not waive](docs/SAFETY.md#what---yes-does-and-does-not-waive)) |
+| `--max-tokens` | int | from config (2048) | Cap on output tokens per request |
+| `--daily-cap` | int | `-1` | Cap on requests per day; `-1` uses the config value, `0` disables the cap |
+| `--config` | string | per-user config dir | Path to an alternate `config.toml` |
+| `--resume` | string | | Resume a saved conversation by name |
+| `--last` | bool | off | Resume the most recently saved conversation |
+| `--save` | string | | Save the completed conversation under this name |
+| `--no-save` | bool | off | Disable automatic conversation saving |
 | `-v`, `--version` | | | Print the version and exit |
 | `-h`, `--help` | | | Help for any command |
 
 ---
 
-## Providers and API keys
-
-Four providers are configured out of the box. Each is reached over HTTP, and
-none of them is asked for a card by yonderllm.
-
-| Provider | Environment variable | Base URL | Default model |
-| --- | --- | --- | --- |
-| `groq` *(default)* | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
-| `gemini` | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash` |
-| `openrouter` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` | `meta-llama/llama-3.3-70b-instruct:free` |
-| `surplus` | `SURPLUS_API_KEY` | `https://api.surplusintelligence.ai/v1` | `gpt-5.6-sol` |
-
-Keys are read from the environment only. yonderllm never writes a key to its
-config file, and the config file names the *variable*, not the secret — so it
-is safe to commit or sync.
-
-### Fallbacks
-
-Providers form a chain. The first one with a key becomes active; the others
-stand by. If the active provider fails a request, yonderllm moves down the
-chain rather than surfacing the error, and reports the substitution as a
-notice. Reorder the chain with `fallbacks` in the config file.
-
-### Any OpenAI-compatible endpoint
-
-The provider list is not closed. Anything that speaks the OpenAI chat
-completions API — another hosted service, or a local server if you decide you
-want one after all — can be added as a `[providers.<name>]` block. Omit
-`api_key_env` for a server that needs no key.
-
----
-
 ## Configuration
 
-### Location
+The file is optional; without it yonderllm uses its built-in defaults.
 
 ```
-$YONDERLLM_CONFIG            if set
-<user config dir>/yonderllm/config.toml   otherwise
+$YONDERLLM_CONFIG                          if set
+<user config dir>/yonderllm/config.toml    otherwise
 ```
-
-Which resolves to:
 
 | OS | Path |
 | --- | --- |
@@ -329,36 +166,10 @@ Which resolves to:
 | macOS | `~/Library/Application Support/yonderllm/config.toml` |
 | Windows | `%AppData%\yonderllm\config.toml` |
 
-Ask rather than guess:
-
-```sh
-yonderllm config path
-```
-
-The file is optional. Without it, yonderllm uses its built-in defaults.
-
-### Precedence
-
-Later layers win:
-
-```
-built-in defaults  →  config file  →  YONDERLLM_* environment  →  command-line flags
-```
-
-Only three settings can be overridden by environment variable:
-
-| Variable | Overrides |
-| --- | --- |
-| `YONDERLLM_PROVIDER` | active provider |
-| `YONDERLLM_MODEL` | model |
-| `YONDERLLM_MODE` | permission mode |
-
-(`YONDERLLM_CONFIG` selects the file itself, and so sits outside the chain.)
-`max_tokens` and `daily_cap` are set in the config file or by flag — there is
-deliberately no environment override for the two settings that guard your
-quota.
-
-### Example
+Later layers win: `built-in defaults → config file → YONDERLLM_* environment → flags`.
+Only `YONDERLLM_PROVIDER`, `YONDERLLM_MODEL`, and `YONDERLLM_MODE` exist as
+environment overrides; `max_tokens` and `daily_cap` are set in the file or by
+flag, deliberately, because they guard your quota.
 
 `yonderllm config init` writes a commented version of this:
 
@@ -370,487 +181,128 @@ mode      = "chat"
 max_tokens = 2048
 daily_cap  = 200
 
+# Optional runtime settings; see docs/PROVIDERS.md
+retry_attempts = 0
+retry_backoff_ms = 500
+request_timeout_seconds = 0
+output_format = "text"
+
 [providers.groq]
 base_url    = "https://api.groq.com/openai/v1"
 api_key_env = "GROQ_API_KEY"
 model       = "llama-3.3-70b-versatile"
-
-[providers.gemini]
-base_url    = "https://generativelanguage.googleapis.com/v1beta/openai"
-api_key_env = "GEMINI_API_KEY"
-model       = "gemini-2.0-flash"
-
-[providers.openrouter]
-base_url    = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_API_KEY"
-model       = "meta-llama/llama-3.3-70b-instruct:free"
-
-[providers.surplus]
-base_url    = "https://api.surplusintelligence.ai/v1"
-api_key_env = "SURPLUS_API_KEY"
-model       = "gpt-5.6-sol"
+# context_window = 131072   # tokens; lets long conversations use the model's real window
 
 # Any OpenAI-compatible endpoint works. Omit api_key_env if it needs no key.
 # [providers.local]
 # base_url = "http://localhost:8080/v1"
+# model    = "whatever-it-serves"
 ```
 
-### The daily cap
-
-`daily_cap` is a local counter, not a provider feature. yonderllm tracks how
-many requests it has made today and refuses the one that would exceed the cap:
-
-```
-daily request cap reached (200/200), resets at 00:00
-```
-
-It exists because free tiers punish enthusiasm quietly and cheap tiers bill it.
-`/usage` in the TUI shows where you stand.
-
-The request count is shared across CLI invocations and TUI sessions on this
-machine and resets at local midnight. It is stored in `yonderllm/usage.json`
-under the OS user cache directory (`%LOCALAPPDATA%` on Windows,
-`$XDG_CACHE_HOME` or `~/.cache` on Linux, `~/Library/Caches` on macOS).
-Concurrent processes lock the counter before reserving a request. The count is
-saved before dispatch, so a process crash can leave a reservation charged.
-One exchange, including fallback attempts and tool rounds, uses one reservation.
-Token totals and provider breakdowns remain per session.
-
-If the counter cannot be read, locked, or saved, the request fails before
-contacting a provider rather than silently resetting the allowance. Fix the
-reported path or permissions; removing `usage.json` deliberately resets the
-count. Clearing the OS cache also resets it. This is a local request limit,
-not a provider quota or a guaranteed spending limit. Different processes use
-their own configured cap against the same count; a cap of `0` disables the
-limit but still records requests.
+On Unix the file must be owner-only (`chmod 600`). `daily_cap` is a local
+request counter shared across processes, not a provider quota; see
+[the daily cap](docs/SAFETY.md#the-daily-cap). Runtime settings, `header_env`,
+`omit_stream_options`, and `context_window` are described in
+[docs/PROVIDERS.md](docs/PROVIDERS.md).
 
 ---
 
 ## The TUI
 
-Bare `yonderllm` opens it. The transcript scrolls above; you type below.
-
-### Save and resume conversations
-
-Interactive sessions automatically save after each completed exchange. Resume
-the most recently saved conversation with `yonderllm --last`, or keep a named
-snapshot with `/save project-notes` in the TUI.
-
-```sh
-yonderllm sessions
-yonderllm run --resume project-notes
-yonderllm ask --save project-notes "Explain this project"
-yonderllm run --resume project-notes "What should I change first?"
-yonderllm --last
-yonderllm --no-save
-yonderllm sessions delete project-notes
-```
-
-`ask` and headless `run` start fresh without saving unless you use `--save`,
-`--resume`, or `--last`. `--no-save` disables automatic saving; an explicit
-`/save` still writes a snapshot. Names use lowercase letters, digits, dots,
-hyphens and underscores (up to 80 characters, no leading/trailing dot).
-Saving an existing name replaces that snapshot.
-
-Resume restores messages, the system prompt, and provider/model selection.
-Explicit `--provider` and `--model` flags override saved selection. Credentials,
-permission modes, approvals, and usage counters come from the current run;
-saved tool calls are historical context and are never executed on load.
-Each resumed run gets a new autosave name unless `--save <name>` is supplied.
-`/clear` starts a new autosave without deleting the prior snapshot.
-
-Files are versioned JSON under `yonderllm/sessions` in the OS user configuration
-directory (`%APPDATA%` on Windows, `$XDG_CONFIG_HOME` or `~/.config` on Linux,
-`~/Library/Application Support` on macOS). Saves use a filesystem lock and
-temporary-file replacement. `sessions` lists valid snapshots newest first;
-unsupported or corrupt files are excluded from listing and rejected on explicit
-resume. Snapshots are limited to 16 MiB.
-
-Recognized credential patterns are redacted from message text, system prompts,
-and tool arguments before saving. Files are **not encrypted**, and pattern-based
-redaction cannot identify every secret. Use `--no-save` for sensitive sessions.
-On Unix, newly created files use owner-only permissions; Windows access follows
-the user directory's ACLs. Autosave preserves completed exchanges, not a response
-interrupted mid-stream. Named snapshots include conversation context, not UI-only
-notices or the output of local `/read` and `/search` commands.
-
-### Slash commands
-
-```
-/model                 show the provider and model in use
-/model <model>         switch model on the current provider
-/model <provider>      switch provider, keeping its configured model
-/model <provider> <model>
-                       switch both at once
-/clear                 forget the conversation so far
-/read <file>           show a file from the workspace
-/search <text>         find a literal string across the workspace
-/usage                 show requests used against the daily cap
-/help                  show this
-```
-
-`/read` and `/search` are governed by `--mode`: both are refused in `chat` and
-allowed in `code` and `agent`. Neither ever prompts, so the permission model is
-enforced end to end without an approval dialog. Paths are relative to the
-directory yonderllm was started in and cannot escape it.
-
-### Keys
+Bare `yonderllm` opens it. The transcript scrolls above; you type below. The
+header shows the provider, model, and permission mode at all times.
 
 | Key | Action |
 | --- | --- |
 | `enter` | Send |
 | `ctrl+j` | Newline |
 | `pgup` / `pgdn` | Scroll the transcript |
-| `ctrl+c` | Stop a reply in flight, or quit |
+| `ctrl+home` / `ctrl+end` | Jump to the top or bottom of the transcript |
+| `ctrl+c` | Stop a reply in flight, or quit when nothing is in flight |
+| `y` | Allow the tool call that is waiting on you; any other key denies it |
 
-`ctrl+c` is deliberately overloaded: the first press interrupts a stream, and a
-press with nothing in flight exits. You never need a second key to escape a
-runaway answer.
+```
+/mode [chat|code|agent] show or change the permission mode
+/retry                  retry an interrupted answer with tools disabled
+/model [provider] [model]
+                        show or switch provider and/or model, keeping the conversation
+/clear                  forget the conversation so far
+/read <file>            show a file from the working directory (code/agent only)
+/search <text>          find that text in the working directory (code/agent only)
+/save <name>            save this conversation so you can resume it later
+/usage                  show requests used against the daily cap
+/help                   show this
+```
 
-Switching model with `/model` keeps the conversation. Only `/clear` discards it.
-
-`/mode` shows the current permission mode; `/mode chat`, `/mode code`, and
-`/mode agent` change it without restarting or losing conversation history.
-The header and the tools offered to the model change together. Chat removes
-all tools; code permits reading/searching and approved writes; agent also
-permits approved commands. Switching to a different mode resets approval
-behavior to per-action prompts, even if the session started with `--yes`.
-Selecting the current mode leaves its policy unchanged. Without an approval
-interface, operations requiring approval remain unavailable.
-
-Mode changes are accepted only while idle. During an answer, finish or cancel
-it first; if the cancelled worker is still stopping, retry `/mode` once it has
-stopped. An open approval question keeps control of the keyboard. Mode changes
-apply to future actions and do not remove previously read content from history.
-
-### Recovering an interrupted answer
-
-Use `/retry` after a failed or cancelled exchange has stopped. The retry sends
-the existing conversation again without duplicating your question. Completed
-tool results remain in context, but **all tools are disabled for the retry**:
-it requests an answer only and cannot repeat file writes or commands. To request
-new actions, send a new prompt after reviewing the previous results.
-
-Partial output stays visible in the transcript; the retried answer starts again
-from the saved conversation context rather than continuing those partial words.
-If cancellation left tool calls without recorded results, retry is refused:
-review the workspace and use `/clear` to start a new conversation. Successful
-answers, including those whose autosave failed, cannot be repeated with `/retry`.
-Retry state is in-memory and clears on `/clear` or resume.
-
-Each retry reserves a request against the daily cap. Partially answered attempts
-and exchanges that reached tool execution keep their original reservation.
-Provider error frames inside HTTP 200 streams are reported as errors, and EOF
-without a finish marker or `[DONE]` is treated as an interruption. Automatic
-provider fallback stops once partial text has arrived, avoiding mixed answers.
+Interactive sessions autosave after each completed exchange; `--last` resumes
+the newest, `--resume <name>` a named snapshot, `--no-save` turns autosave off.
+`/mode` changes take effect while idle and drop `--yes`. Saved conversations,
+`/retry`, and the approval prompt are described in
+[docs/SAFETY.md](docs/SAFETY.md#saved-conversations) and
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#recovering-an-interrupted-answer).
 
 ---
 
-## Tools
+## Modes and tools
 
-`/read` and `/search` are you looking at the project. Tools are the *model*
-looking at it. In `code` and `agent` mode yonderllm tells the model which
-capabilities it has, and when the model asks for one, yonderllm runs it and
-feeds the result back — without leaving the turn you are already in.
+`--mode` sets how much yonderllm — and the model — may touch. Sessions start in
+`chat`; nothing promotes itself out of it.
 
-| Tool | What the model gets |
+| Mode | Read / search | Write | Execute | Tools offered to the model |
+| --- | --- | --- | --- | --- |
+| `chat` *(default)* | ✗ | ✗ | ✗ | none |
+| `code` | allow | ask | ✗ | `read_file`, `search_files`, `write_file` |
+| `agent` | allow | ask | ask | `read_file`, `search_files`, `write_file`, `run_command` |
+
+Every write and every command is shown to you — a diff, or the exact argument
+vector — and runs only after you press `y`. `--yes` (agent mode only) answers
+in advance, but recognised destructive or interpreter commands, writes to
+hook-like files (`.githooks/`, `Makefile`, `package.json`, …), and reads of
+credential-like files (`.env`, `id_rsa`, …) are still confirmed, and writes under
+`.git/` are refused outright. In non-interactive runs (`run --json`, a pipe) a
+tool that would need approval is withheld from the model entirely. File access
+is confined to the directory yonderllm was started in via `os.Root`; commands
+run as your OS user without a sandbox and do not see your configured API keys.
+The full rules, limits, and what containment does *not* cover:
+[docs/SAFETY.md](docs/SAFETY.md).
+
+---
+
+## Scripting
+
+`run --json` emits one JSON object per line, flushed as it arrives. Every event
+carries `schema_version`, `type`, and the `provider` and `model` that produced
+it; a stream ends with exactly one `done` or `error`.
+
+```sh
+yonderllm run --json "count to three" | jq -rj 'select(.type=="delta").delta'
+```
+
+The event schema, tool events, exit codes, and recipes for PowerShell and
+Python: [docs/SCRIPTING.md](docs/SCRIPTING.md). Versioning of the NDJSON
+contract: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+---
+
+## Documentation
+
+| | |
 | --- | --- |
-| `read_file` | One UTF-8 text file, addressed relative to the project root |
-| `search_files` | Every line in the project matching a literal string, with its path |
+| [docs/INSTALL.md](docs/INSTALL.md) | Binaries, source builds, release builds, completion |
+| [docs/PROVIDERS.md](docs/PROVIDERS.md) | Built-in providers, custom endpoints, runtime settings, price tiers |
+| [docs/SAFETY.md](docs/SAFETY.md) | Modes, tools, approvals, `--yes`, containment, saved data, daily cap |
+| [docs/SCRIPTING.md](docs/SCRIPTING.md) | `run --json` event schema and recipes |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Errors, recovery, `/retry` |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Versioning, build metadata, NDJSON contract |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Building, testing, CI, project layout, conventions |
+| [docs/EVALUATION.md](docs/EVALUATION.md) | The `yonder-eval` provider evaluation runner |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Trust boundaries, controls, residual risks |
+| [SPEC.md](SPEC.md) | Goals, non-goals, and interface contracts |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each release |
 
-Both take a single argument and are described to the model by JSON Schema, so a
-malformed call is refused with a sentence the model can act on rather than
-silently mishandled:
-
-```json
-{"name": "read_file",    "arguments": {"path":  "internal/cli/run.go"}}
-{"name": "search_files", "arguments": {"query": "func newSessionFor"}}
-```
-
-Search is literal and case-insensitive — no regular expressions, because a
-model that guesses at a regex dialect wastes a round trip finding out which one
-it got.
-
-### What the model is told
-
-The tool list is built from the permission policy, not filtered after the fact.
-A capability the current mode does not allow is **never described to the
-model** — it cannot ask for what it has not been offered, so a refusal is not
-something the model has to be talked out of.
-
-| Mode | Tools offered |
-| --- | --- |
-| `chat` | none |
-| `code` | `read_file`, `search_files` |
-| `agent` | `read_file`, `search_files` |
-
-Only capabilities the mode marks *allow* are offered. Anything the mode would
-merely *ask* about is withheld, because nothing in this loop can raise a prompt
-yet. That is why reading and searching came first: they are `allow` in both
-`code` and `agent`, so the tool loop needed no approval dialog to be correct.
-
-### The loop
-
-A turn is a conversation, not a single request. The model may answer, or it may
-call tools; if it calls, yonderllm runs them in order, appends each result, and
-asks again. The loop is bounded at **six rounds**. On the last round the tools
-are withheld, which turns the ceiling into a prose answer instead of a
-truncation — the model is asked to conclude with what it has rather than cut
-off mid-investigation.
-
-The whole exchange uses one reservation against the daily cap, and token usage accumulates
-across the whole turn so the footer reports the true cost of the answer, not
-just its final leg.
-
-Results are capped at 8 KiB and clipped on a line boundary, with a note saying
-how many lines were dropped. A tool result goes straight into the next prompt,
-so an unbounded one would spend your context window on a file the model only
-needed to glance at.
-
-### What you see
-
-Tool calls are not hidden. Each one lands in the transcript as its own block —
-the tool's name, the arguments it was called with, and the result once it
-returns, clipped for display:
-
-```
-tool search_files
-{"query": "parseFlags"}
-  3 matches for "parseFlags"
-  cmd/app/main.go:24: flags, err := parseFlags(os.Args[1:])
-  internal/app/flags.go:31: // parseFlags reads an argument list into a Flags.
-  internal/app/flags.go:36: func parseFlags(args []string) (Flags, error) {
-
-tool read_file
-{"path": "internal/app/flags.go"}
-  internal/app/flags.go
-  package app
-
-  import "flag"
-
-  ... 26 more lines
-```
-
-An answer that leans on a file you did not expect is visible as it happens,
-which is the difference between a tool loop you can trust and one you have to
-audit afterwards.
-
-Scripts see the same thing. `run --json` reports each call as a `tool` event
-and each outcome as a `tool_result`, described in the [event
-schema](#event-schema) below. Plain `run` prints only the answer, so a tool
-loop never disturbs output something else is already parsing.
-
-### Containment
-
-Every read and every search goes through `internal/workspace`, which holds an
-`os.Root` on the directory yonderllm was started in. Containment is a property
-of the handle, not a string check performed hopefully at the top of a function.
-
-| Refused | Because |
-| --- | --- |
-| Absolute paths | Addressable only inside the project |
-| Anything reaching `..` past the root | Escape, rejected before any syscall |
-| Windows device names such as `NUL`, `COM1` | Not files, however they resolve |
-| Binary files | Sniffed, not trusted by extension |
-| Files over 1 MiB | A prompt is not a place to put a megabyte |
-
-Searches stop at 200 matches and skip the directories nobody means to search —
-`.git`, `node_modules`, `vendor`, build output. Unreadable files are skipped
-rather than aborting the walk: one permission error in a tree should not cost
-you the other 900 results.
-
----
-
-## Scripting with `run --json`
-
-`run --json` emits newline-delimited JSON — one object per line, flushed as it
-arrives, so a pipe stays live for the whole stream.
-
-```sh
-yonderllm run --json "count to three"
-```
-
-```json
-{"type":"notice","notice":"groq unavailable, using gemini","provider":"gemini","model":"gemini-2.0-flash"}
-{"type":"delta","delta":"one"}
-{"type":"delta","delta":", two"}
-{"type":"delta","delta":", three"}
-{"type":"done","provider":"gemini","model":"gemini-2.0-flash","usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}
-```
-
-### Event schema
-
-| Field | Type | Present on | Meaning |
-| --- | --- | --- | --- |
-| `type` | string | all | `delta`, `notice`, `tool`, `tool_result`, `done`, or `error` |
-| `delta` | string | `delta` | The next fragment of the reply |
-| `notice` | string | `notice` | Something worth knowing, such as a fallback |
-| `provider` | string | all | Provider that served the request |
-| `model` | string | all | Model that served the request |
-| `tool` | object | `tool`, `tool_result` | The call, and then how it ended |
-| `error` | string | `error` | What went wrong |
-| `usage` | object | `done` | `prompt_tokens`, `completion_tokens`, `total_tokens` |
-
-A stream ends with exactly one `done` or one `error`. Notices are informational
-and never terminal, which means a consumer can ignore every type it does not
-recognise and still be correct.
-
-Every event carries `provider` and `model`, so a line is meaningful on its own
-even when a fallback changed which provider was answering partway through. The
-examples here elide both for readability.
-
-### Tool events
-
-A call and its outcome are two events, not one, because the call is worth
-showing before the work has finished. They share an `id`, so a consumer can pair
-them without depending on adjacency:
-
-```json
-{"type":"tool","tool":{"id":"call_1","name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}
-{"type":"tool_result","tool":{"id":"call_1","name":"read_file","arguments":"{\"path\":\"go.mod\"}","result":"go.mod\nmodule yonderllm\n"}}
-```
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `id` | string | Ties a `tool_result` to its `tool` |
-| `name` | string | `read_file` or `search_files` |
-| `arguments` | string | The JSON the model sent, verbatim |
-| `result` | string | What the tool returned, on success |
-| `error` | string | Why the tool refused, instead of `result` |
-
-`arguments` is a string and not an object on purpose: it is the model's own
-JSON, passed through unaltered. yonderllm will not reformat a malformed call
-into something that looks valid, so what you see is what the model actually
-asked for.
-
-A `tool_result` carries exactly one of `result` or `error`. A refused call is
-not a failed turn — the message goes back to the model, which usually corrects
-itself and answers, and the stream still ends in `done`.
-
-Watch what the model reads:
-
-```sh
-yonderllm run --mode code --json "$PROMPT" \
-  | jq -r 'select(.type=="tool") | "\(.tool.name) \(.tool.arguments)"'
-```
-
-Reassemble a reply:
-
-```sh
-yonderllm run --json "$PROMPT" | jq -rj 'select(.type=="delta").delta'
-```
-
-Fail a script on a provider error:
-
-```sh
-yonderllm run --json "$PROMPT" \
-  | jq -e 'select(.type=="error") | halt_error(1)' >/dev/null
-```
-
----
-
-## Modes
-
-`--mode` sets how much yonderllm is permitted to touch.
-
-| Mode | Read / search | Write | Execute |
-| --- | --- | --- | --- |
-| `chat` *(default)* | ✗ | ✗ | ✗ |
-| `code` | allow | ask | ✗ |
-| `agent` | allow | ask | ask |
-
-The policy is enforced in one place, `internal/perm`, so the rules can be read
-and tested as a unit rather than inferred from call sites. Escalation is always
-an explicit act: nothing promotes itself out of `chat`.
-
-Reading and searching are live in both directions. You reach them with `/read`
-and `/search`; the model reaches them as [tools](#tools). Both directions go
-through the same `perm.Policy`, so a mode that refuses you refuses the model
-too — and a capability the mode does not allow is never even described to the
-model.
-
-> **Status.** Write and execute are not built yet, so the `ask` cells in the
-> table above describe the policy the remaining tools will be wired into, not
-> capabilities that exist today. No mode writes a file or runs a command. That
-> also means `code` and `agent` currently offer the model the same two tools;
-> they diverge once write and execute arrive with the approval prompt they
-> require.
-
----
-
-## Project layout
-
-```
-cmd/yonderllm/      entry point; nothing but wiring
-internal/cli/       commands, flags, and the defaults → config → env → flags resolver
-internal/config/    the config file, its paths, and its precedence rules
-internal/provider/  HTTP clients for OpenAI-compatible endpoints
-internal/session/   conversation state, streaming, fallback chain, usage cap
-internal/perm/      the permission policy
-internal/tools/     the capabilities the model is offered, gated by that policy
-internal/tui/       the Bubble Tea interface
-internal/workspace/ containment-checked file reads and searches
-```
+Community: [contributing](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md),
+[security reporting](SECURITY.md), [issues](https://github.com/MoneyPack/yonderllm/issues).
 
 Built on [Cobra](https://github.com/spf13/cobra),
-[Bubble Tea](https://github.com/charmbracelet/bubbletea),
-[Bubbles](https://github.com/charmbracelet/bubbles),
-[Lip Gloss](https://github.com/charmbracelet/lipgloss), and
-[BurntSushi/toml](https://github.com/BurntSushi/toml). Five direct
-dependencies, no C, one binary.
-
----
-
-## Development
-
-```sh
-go vet ./...
-go test ./...
-```
-
-On Windows, if Go is installed but not on `PATH`:
-
-```powershell
-& "C:\Program Files\Go\bin\go.exe" vet ./...
-& "C:\Program Files\Go\bin\go.exe" test ./...
-```
-
-### Continuous integration
-
-Every push and pull request against `main` runs
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). The toolchain version
-comes from `go.mod`, so the workflow cannot drift from what the module declares.
-
-Two jobs:
-
-- **test** — gofmt, `go vet`, `go build`, and `go test` on `ubuntu-latest`,
-  `windows-latest`, and `macos-latest`, the three platforms the project ships
-  binaries for. The matrix does not fail fast, so one red platform still
-  reports the others. It earns its cost: reserved device names are refused on
-  Windows only, and the configuration search path differs on every OS.
-- **race and coverage** — `go test -race` plus a coverage total, on Ubuntu
-  alone. The race detector requires cgo, and yonderllm is deliberately pure
-  Go, so a C compiler is not something every runner can be assumed to have.
-  One platform is enough: the goroutines under test are the session's tool
-  loop and event stream, which are identical everywhere.
-
-### Cross-compiling
-
-```sh
-GOOS=linux  GOARCH=amd64 go build -o dist/yonderllm-linux-amd64  ./cmd/yonderllm
-GOOS=linux  GOARCH=arm64 go build -o dist/yonderllm-linux-arm64  ./cmd/yonderllm
-GOOS=darwin GOARCH=arm64 go build -o dist/yonderllm-darwin-arm64 ./cmd/yonderllm
-```
-
-No cgo, so every target cross-compiles from any host.
-
-### Conventions
-
-- Every file opens with a prose doc comment explaining what it is for and why
-  it is separate from its neighbours.
-- Tests assert on substrings, not exact output, so that wording can improve
-  without a test rewrite.
-- `SPEC.md` holds the goals, non-goals, and interface contracts. It is the
-  document to change first when the design changes.
-
-![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/blazingscrubs-hub/yonderllm?utm_source=oss&utm_medium=github&utm_campaign=blazingscrubs-hub%2Fyonderllm&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
+[Bubble Tea](https://github.com/charmbracelet/bubbletea), and friends — eight
+direct dependencies, no cgo, one binary. [MIT licensed](LICENSE).

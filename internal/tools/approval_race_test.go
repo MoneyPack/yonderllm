@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"yonderllm/internal/perm"
+	"github.com/MoneyPack/yonderllm/internal/perm"
 )
 
 func TestWriteRechecksCancellationAndApprovalDiff(t *testing.T) {

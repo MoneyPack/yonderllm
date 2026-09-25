@@ -102,6 +102,77 @@ func TestSentinelErrorsAreDistinct(t *testing.T) {
 	}
 }
 
+// TestNoModelErrorNamesProviderAndHint covers both branches of the message:
+// with a hint the user is told where to put the model, and without one the
+// message ends cleanly rather than with a dangling "set".
+func TestNoModelErrorNamesProviderAndHint(t *testing.T) {
+	with := &NoModelError{Provider: "local", Hint: "providers.local.model"}
+	if got := with.Error(); got != "local: no model configured: set providers.local.model" {
+		t.Errorf("NoModelError.Error() = %q", got)
+	}
+	without := &NoModelError{Provider: "local"}
+	if got := without.Error(); got != "local: no model configured" {
+		t.Errorf("NoModelError.Error() without hint = %q", got)
+	}
+	wrapped := fmt.Errorf("asking local: %w", with)
+	if !errors.Is(wrapped, ErrNoModel) {
+		t.Errorf("errors.Is(%v, ErrNoModel) = false, want true", wrapped)
+	}
+	if errors.Is(wrapped, ErrQuota) || errors.Is(wrapped, ErrAuth) || errors.Is(wrapped, ErrUnavailable) {
+		t.Errorf("%v matched a sentinel other than ErrNoModel", wrapped)
+	}
+}
+
+// TestUnavailableErrorMessageBranches covers the reason-less form, which is
+// what a bare 503 with an empty body produces, alongside the explained one.
+func TestUnavailableErrorMessageBranches(t *testing.T) {
+	bare := &UnavailableError{Provider: "groq", Status: 503}
+	if got := bare.Error(); got != "groq: unavailable (HTTP 503)" {
+		t.Errorf("UnavailableError.Error() = %q", got)
+	}
+	explained := &UnavailableError{Provider: "groq", Status: 502, Reason: "upstream gone"}
+	if got := explained.Error(); got != "groq: unavailable: upstream gone (HTTP 502)" {
+		t.Errorf("UnavailableError.Error() with reason = %q", got)
+	}
+	if !errors.Is(fmt.Errorf("x: %w", bare), ErrUnavailable) {
+		t.Error("UnavailableError does not unwrap to ErrUnavailable")
+	}
+}
+
+// TestFailureHintClassifiesWithoutEchoingProviderText pins the one property
+// FailureHint exists for: the hint names the class of failure and what to do
+// about it, and never repeats the provider's own message, which may carry a
+// key or arbitrary text. The retry-after branch is the only one that carries
+// data from the error, and it is a duration, not text.
+func TestFailureHintClassifiesWithoutEchoingProviderText(t *testing.T) {
+	const leak = "sk-should-never-appear"
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"quota with retry", &QuotaError{Provider: leak, RetryAfter: 45 * time.Second}, "retry after 45s"},
+		{"quota without retry", fmt.Errorf("wrap: %w", &QuotaError{Provider: leak}), "check allowance"},
+		{"bare quota sentinel", ErrQuota, "quota exhausted"},
+		{"auth", &AuthError{Provider: leak, Reason: leak}, "API key environment variable"},
+		{"no model", &NoModelError{Provider: leak, Hint: leak}, "--model"},
+		{"unavailable", &UnavailableError{Provider: leak, Status: 503, Reason: leak}, "try again later"},
+		{"unknown", errors.New(leak), "check connection"},
+		{"nil", nil, "request failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FailureHint(tc.err)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("FailureHint(%v) = %q, want it to contain %q", tc.err, got, tc.want)
+			}
+			if strings.Contains(got, leak) {
+				t.Errorf("FailureHint(%v) = %q echoed provider text", tc.err, got)
+			}
+		})
+	}
+}
+
 // TestChatCompatNameReportsConstructorArgument covers the accessor the session
 // layer uses to label which provider answered.
 func TestChatCompatNameReportsConstructorArgument(t *testing.T) {

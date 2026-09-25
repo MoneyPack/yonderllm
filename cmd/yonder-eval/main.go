@@ -14,11 +14,12 @@ import (
 	"os/signal"
 	"time"
 
-	"yonderllm/internal/config"
-	"yonderllm/internal/evaluation"
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
-	"yonderllm/internal/terminaltext"
+	"github.com/MoneyPack/yonderllm/internal/adapters"
+	"github.com/MoneyPack/yonderllm/internal/config"
+	"github.com/MoneyPack/yonderllm/internal/evaluation"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/terminaltext"
 )
 
 type report struct {
@@ -68,30 +69,42 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "invalid arguments: positive timeout up to 1h and max-tokens required; no positional arguments")
 		return 2
 	}
-	cfg := config.Config{Provider: "fixture", MaxTokens: *maxTokens, Providers: map[string]config.ProviderConfig{"fixture": {Model: "fixture-v1"}}}
+	// Each case has a fresh isolated session. No fallback, retries, saved
+	// conversations, workspace access, or user's daily-counter mutation.
+	// The session is built from Options directly: the fixture path has no
+	// config file at all, and the live path only borrows the provider entry
+	// it was pointed at.
+	opts := session.Options{
+		Provider:  "fixture",
+		MaxTokens: *maxTokens,
+		Providers: map[string]session.ProviderOptions{"fixture": {Model: "fixture-v1", Credentialed: true}},
+	}
+	// pc is the live provider's configuration, used to build adapters. It
+	// stays zero in fixture mode, where no adapter is ever built.
+	var pc config.ProviderConfig
 	mode := "fixture"
 	if *live {
 		if *path == "" || *name == "" || *model == "" {
 			fmt.Fprintln(stderr, "live runs require --config, --provider, and --model")
 			return 2
 		}
-		var err error
-		cfg, err = config.Load(*path)
+		cfg, err := config.Load(*path)
 		if err != nil {
 			fmt.Fprintln(stderr, "cannot load evaluation config:", err)
 			return 2
 		}
-		pc, exists := cfg.Providers[*name]
+		var exists bool
+		pc, exists = cfg.Providers[*name]
 		if !exists || !cfg.Credentialed(*name) {
 			fmt.Fprintln(stderr, "evaluation provider is missing or has no credential")
 			return 2
 		}
 		pc.Model = *model
-		cfg.Providers[*name] = pc
-		cfg.Provider, cfg.MaxTokens = *name, *maxTokens
-		// Each case has a fresh isolated session. No fallback, retries, saved
-		// conversations, workspace access, or user's daily-counter mutation.
-		cfg.Fallbacks, cfg.RetryAttempts, cfg.DailyCap, cfg.RequestTimeoutSeconds = nil, 0, 0, 0
+		opts = session.Options{
+			Provider:  *name,
+			MaxTokens: *maxTokens,
+			Providers: map[string]session.ProviderOptions{*name: {Model: *model, Credentialed: true, ContextWindow: pc.ContextWindow}},
+		}
 		mode = "live"
 	} else if *path != "" || *name != "" || *model != "" || *budgetUSD != 0 {
 		fmt.Fprintln(stderr, "provider flags require --live")
@@ -101,13 +114,8 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) int {
 		MaxTokens: *maxTokens, Timeout: timeout.String(), Fallbacks: []string{}, Passed: true}
 	var budget *evaluation.Budget
 	if *budgetUSD > 0 {
-		pc := cfg.Providers[cfg.Provider]
 		priceCtx, cancel := context.WithTimeout(ctx, *timeout)
-		var options []provider.ChatOption
-		for header, env := range pc.HeaderEnv {
-			options = append(options, provider.WithHeader(header, os.Getenv(env)))
-		}
-		catalogue, err := provider.NewChatCompat(cfg.Provider, pc.BaseURL, pc.APIKey(), options...).Models(priceCtx)
+		catalogue, err := adapters.New(opts.Provider, pc).Models(priceCtx)
 		cancel()
 		if err != nil {
 			fmt.Fprintln(stderr, "cannot check model pricing:", err)
@@ -127,23 +135,18 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) int {
 	}
 	var last provider.Provider
 	for _, c := range evaluation.Cases() {
-		var p provider.Provider = evaluation.Fixture(c.ID)
+		p := evaluation.Fixture(c.ID)
 		if *live {
-			pc := cfg.Providers[cfg.Provider]
-			opts := []provider.ChatOption{}
+			// A fresh adapter per case so that the budget transport, when
+			// there is one, is the only state shared across cases.
+			var extra []provider.ChatOption
 			if budget != nil {
-				opts = append(opts, provider.WithHTTPClient(&http.Client{Transport: budget}))
+				extra = append(extra, provider.WithHTTPClient(&http.Client{Transport: budget}))
 			}
-			if pc.OmitStreamOptions {
-				opts = append(opts, provider.WithoutStreamOptions())
-			}
-			for header, env := range pc.HeaderEnv {
-				opts = append(opts, provider.WithHeader(header, os.Getenv(env)))
-			}
-			p = provider.NewChatCompat(cfg.Provider, pc.BaseURL, pc.APIKey(), opts...)
+			p = adapters.New(opts.Provider, pc, extra...)
 		}
 		last = p
-		s := session.New(cfg, func(string) (provider.Provider, error) { return p, nil })
+		s := session.NewWithOptions(opts, func(string) (provider.Provider, error) { return p, nil })
 		caseCtx, cancel := context.WithTimeout(ctx, *timeout)
 		result := evaluation.Run(caseCtx, s, c, time.Now)
 		cancel()
@@ -158,7 +161,7 @@ func run(ctx context.Context, args []string, out, stderr io.Writer) int {
 		if !*live {
 			last = evaluation.Fixture("arithmetic")
 		}
-		s := session.New(cfg, func(string) (provider.Provider, error) { return last, nil })
+		s := session.NewWithOptions(opts, func(string) (provider.Provider, error) { return last, nil })
 		r.Cancellation = evaluation.ProbeCancellation(probeCtx, s, time.Now)
 		cancel()
 	} else {

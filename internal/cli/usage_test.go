@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/session"
 )
 
 func TestDailyCapSurvivesCLIInvocations(t *testing.T) {

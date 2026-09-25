@@ -8,6 +8,12 @@
 # The race detector needs cgo, and yonderllm is deliberately pure Go, so no
 # runner is guaranteed to have a C compiler. Race runs on Ubuntu, where one is,
 # and the other platforms run the ordinary test binary.
+#
+# The remaining jobs each answer one question the matrix does not: is the code
+# lint-clean, are the dependencies free of known vulnerabilities, does it
+# cross-compile for the arm64 targets we ship without testing on, and do the
+# benchmarks still compile. They run once, on Ubuntu, because none of them has
+# per-platform behaviour worth paying three runners for.
 
 name: CI
 
@@ -82,3 +88,77 @@ jobs:
 
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -n 1
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Trailing whitespace and leftover conflict markers survive gofmt in
+      # anything that is not Go source. Diffing the whole tree against the
+      # empty tree checks every tracked file, not just the ones this commit
+      # touched. Markdown is excluded because a trailing double space is a
+      # line break there, not a mistake.
+      - name: Whitespace and conflict markers
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD -- . ':!*.md'
+
+      # golangci-lint runs staticcheck, errcheck and friends in one pass; the
+      # set is in .golangci.yml so a local run agrees with CI. The action is
+      # pinned to a release, and the linter version is pinned inside it, so a
+      # new check landing upstream cannot turn main red on its own.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.14.0
+
+  vulnerabilities:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # govulncheck reports only vulnerabilities in functions the binary
+      # actually reaches, so a finding here is one worth acting on rather than
+      # a transitive dependency's problem. It runs at @latest deliberately:
+      # the database moves faster than any pin would, and a stale checker is
+      # the same as none.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  portability:
+    name: cross-build and benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Releases ship arm64 binaries for Linux and macOS, but the matrix only
+      # tests amd64 Linux and Windows plus whatever macos-latest is running.
+      # Compiling for the other targets catches a build tag or syscall that
+      # only exists on one of them before a release does.
+      - name: Build linux/arm64
+        run: GOOS=linux GOARCH=arm64 go build ./...
+
+      - name: Build darwin/arm64
+        run: GOOS=darwin GOARCH=arm64 go build ./...
+
+      # Benchmarks are compiled into the test binary but never run by
+      # `go test`, so one that stops compiling goes unnoticed until someone
+      # wants a number. Running each once with no tests selected keeps them
+      # honest without turning CI into a performance suite.
+      - name: Benchmarks compile and run once
+        run: go test ./... -run '^$' -bench . -benchtime=1x

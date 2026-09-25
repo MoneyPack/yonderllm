@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoneyPack/yonderllm/internal/config"
+	"github.com/MoneyPack/yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/terminaltext"
 	"github.com/spf13/cobra"
 	"iter"
-	"yonderllm/internal/config"
-	"yonderllm/internal/provider"
-	"yonderllm/internal/session"
-	"yonderllm/internal/terminaltext"
 )
 
 type terminalProvider struct{}

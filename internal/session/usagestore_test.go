@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"yonderllm/internal/provider"
+	"github.com/MoneyPack/yonderllm/internal/provider"
 )
 
 func TestPersistentUsageSharesReservations(t *testing.T) {
@@ -24,7 +24,9 @@ func TestPersistentUsageSharesReservations(t *testing.T) {
 	if err := b.Reserve(); !errors.As(err, &capped) {
 		t.Fatalf("second counter bypassed cap: %v", err)
 	}
-	a.Release()
+	if err := a.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
 	if err := b.Reserve(); err != nil {
 		t.Fatalf("refund not visible: %v", err)
 	}
@@ -67,7 +69,9 @@ func TestPersistentUsageLateRefundDoesNotSpendNewDay(t *testing.T) {
 	if err := b.Reserve(); err != nil {
 		t.Fatal(err)
 	}
-	a.Release()
+	if err := a.Release(); err != nil {
+		t.Fatalf("late Release: %v", err)
+	}
 	var capped *CapError
 	if err := newPersistentUsage(1, clock.now, path).Reserve(); !errors.As(err, &capped) {
 		t.Fatalf("yesterday's refund changed today: %v", err)

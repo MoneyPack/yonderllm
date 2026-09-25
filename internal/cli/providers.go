@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"yonderllm/internal/terminaltext"
+	"github.com/MoneyPack/yonderllm/internal/terminaltext"
 
-	"yonderllm/internal/config"
+	"github.com/MoneyPack/yonderllm/internal/config"
 )
 
 // newProvidersCmd builds the command that reports what backends are configured

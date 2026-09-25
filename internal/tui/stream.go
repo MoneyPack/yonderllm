@@ -12,7 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"yonderllm/internal/session"
+	"github.com/MoneyPack/yonderllm/internal/session"
 )
 
 // streamBuffer is how many events may sit in flight before the producing
