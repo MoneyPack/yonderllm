@@ -96,7 +96,7 @@ jobs:
           ./dist/yonderllm-linux-amd64 version --json
           ./dist/yonderllm-linux-amd64 version --json | grep -q "\"version\":\"${GITHUB_REF_NAME#v}\""
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: yonderllm-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
@@ -111,7 +111,7 @@ jobs:
       # workflow performs.
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
