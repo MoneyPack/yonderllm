@@ -1,20 +1,21 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/lipgloss"
+)
 
-// Colours are given as 256-colour indices rather than hex so that the palette
-// degrades predictably on the plain terminals a thin client is likely to meet:
-// a hex value on a 16-colour terminal is approximated by the terminal, an
-// index is not.
+// Horizon palette — distant sky, not the pink/magenta that reads as a generic
+// AI terminal. Indices (not hex) so 16-colour terminals degrade predictably.
 const (
-	brandFG  = lipgloss.Color("212")
-	brandInk = lipgloss.Color("232")
-	userFG   = lipgloss.Color("117")
-	toolFG   = lipgloss.Color("114")
-	noticeFG = lipgloss.Color("221")
-	errorFG  = lipgloss.Color("203")
-	mutedFG  = lipgloss.Color("245")
-	ruleFG   = lipgloss.Color("238")
+	brandFG  = lipgloss.Color("73")  // teal — far sky
+	brandInk = lipgloss.Color("232") // near-black on the brand chip
+	userFG   = lipgloss.Color("110") // cool sky for "you"
+	toolFG   = lipgloss.Color("108") // sage for tool results
+	noticeFG = lipgloss.Color("179") // warm sand for session notices
+	errorFG  = lipgloss.Color("167") // coral — loud without neon
+	mutedFG  = lipgloss.Color("243") // secondary chrome
+	ruleFG   = lipgloss.Color("238") // header rule
 )
 
 // styles is the full set of rendering styles, built once and carried on the
@@ -69,14 +70,27 @@ func stylesFor(r *lipgloss.Renderer) styles {
 		toolTag:  r.NewStyle().Bold(true).Foreground(toolFG),
 		notice:   r.NewStyle().Foreground(noticeFG),
 		errorTag: r.NewStyle().Bold(true).Foreground(errorFG),
-		// The approval prompt borrows the notice colour, because it is
-		// the same sort of claim — the session telling the user
-		// something about itself rather than a model speaking — but it
-		// is bold, since it is asking rather than reporting.
+		// Approvals share the sand notice colour but stay bold: they ask,
+		// they do not merely report.
 		approvalTag: r.NewStyle().Bold(true).Foreground(noticeFG),
 		body:        r.NewStyle(),
 		muted:       r.NewStyle().Foreground(mutedFG),
 		footer:      r.NewStyle().Foreground(mutedFG),
 		cursor:      r.NewStyle().Bold(true).Foreground(brandFG),
 	}
+}
+
+// styleInput paints the prompt chrome so the input belongs to the same
+// palette as the header rather than the bubbles defaults (grey thick border).
+// Called whenever styles are (re)built, including when Run swaps in a
+// renderer bound to a non-stdout writer.
+func styleInput(input *textarea.Model, s styles) {
+	input.Prompt = "› "
+	input.FocusedStyle.Prompt = s.cursor
+	input.BlurredStyle.Prompt = s.muted
+	input.FocusedStyle.Placeholder = s.muted
+	input.BlurredStyle.Placeholder = s.muted
+	input.FocusedStyle.Text = s.body
+	input.BlurredStyle.Text = s.muted
+	input.Cursor.Style = s.cursor
 }

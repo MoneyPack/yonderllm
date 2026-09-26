@@ -64,6 +64,7 @@ func Run(opts Options) error {
 		// that NO_COLOR, TERM and terminal detection describe the
 		// output rather than a standard output it may not be using.
 		m.styles = stylesFor(lipgloss.NewRenderer(opts.Out))
+		styleInput(&m.input, m.styles)
 	}
 
 	if _, err := tea.NewProgram(m, teaOpts...).Run(); err != nil {

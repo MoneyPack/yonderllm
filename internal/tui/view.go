@@ -60,16 +60,18 @@ func (m model) welcome() string {
 		"",
 		m.styles.muted.Render("Inference runs remotely on your chosen provider."),
 		"",
-		m.styles.metaKey.Render("enter") + " send   " + m.styles.metaKey.Render("/help") + " commands",
+		m.styles.metaKey.Render("enter") + m.styles.muted.Render(" send   ") +
+			m.styles.metaKey.Render("/help") + m.styles.muted.Render(" commands"),
 	}
 	if m.sessions != nil {
-		text = append(text, m.styles.metaKey.Render("/save <name>")+" save this conversation")
+		text = append(text, m.styles.metaKey.Render("/save <name>")+m.styles.muted.Render(" save this conversation"))
 	}
 	if height < 8 || width < 40 {
 		text = []string{
 			m.styles.botTag.Render("Your model lives yonder."),
 			m.styles.muted.Render("Inference runs remotely."),
-			"enter send · /help commands",
+			m.styles.metaKey.Render("enter") + m.styles.muted.Render(" send · ") +
+				m.styles.metaKey.Render("/help"),
 		}
 		if m.sessions != nil && height >= 4 {
 			text = append(text, "/save <name>")
@@ -136,7 +138,9 @@ func (m model) footer() string {
 		if activity == "" {
 			activity = "answering"
 		}
-		frames := []string{"·", "✦", "✧", "✦"}
+		// Braille spinner — one cell wide, calm motion, no star glyphs that
+		// collapse to tofu on older Windows consoles.
+		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"}
 		frame := frames[m.spinner%len(frames)]
 		const stop = " ctrl+c stop"
 		hint = truncate(fmt.Sprintf("%s %s…", frame, activity), m.width-len(stop)) + stop

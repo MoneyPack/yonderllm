@@ -130,6 +130,7 @@ func newModelWithSessions(sess *session.Session, mode perm.Mode, approvals *Appr
 	input.ShowLineNumbers = false
 	input.CharLimit = 0
 	input.SetHeight(inputHeight)
+	styleInput(&input, s)
 	input.Focus()
 
 	view := viewport.New(0, 0)
