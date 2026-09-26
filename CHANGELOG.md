@@ -37,6 +37,8 @@ Working-tree changes since v0.2.0-rc.2. Not yet published as a release.
   `docs/history/` for retired planning records.
 - Regression tests for TUI key routing (typing no longer scrolls the
   transcript), the approval double-answer race, and rendering.
+- Horizon TUI palette (teal brand chip, sand notices, braille spinner,
+  styled `›` prompt) in place of the previous pink/star look.
 
 ### Changed
 
